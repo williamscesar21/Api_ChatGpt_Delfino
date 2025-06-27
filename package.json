@@ -1,0 +1,39 @@
+{
+  "name": "my-file-chatbot",
+  "version": "1.1.0",
+  "description": "API Express + OpenAI que responde preguntas sobre archivos .docx y .xlsx con búsqueda semántica por embeddings",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --exec node -r dotenv/config index.js",
+    "start": "node -r dotenv/config index.js",
+    "index": "node -r dotenv/config scripts/indexFiles.js"
+  },
+  "dependencies": {
+    "compute-cosine-similarity": "^1.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.19.2",
+    "lru-cache": "^11.1.0",
+    "mammoth": "^1.4.27",
+    "openai": "^4.39.1",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "express",
+    "openai",
+    "embeddings",
+    "docx",
+    "xlsx",
+    "chatbot"
+  ],
+  "author": "Tu Nombre",
+  "license": "MIT"
+}

@@ -1,0 +1,17 @@
+# Node
+node_modules/
+.npm/
+.cache/
+
+# Logs & OS
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# VSCode / WebStorm
+.vscode/
+.idea/
+
+
+/vectorstore/index.json
