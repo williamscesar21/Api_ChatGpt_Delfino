@@ -17,7 +17,7 @@ app.use(helmet());
 app.use(express.json({ limit: '4mb' }));
 
 /* ───────── CORS (UNA sola configuración coherente) ───────── */
-const FRONT_ORIGIN = process.env.FRONT_ORIGIN || 'http://localhost:5173';
+const FRONT_ORIGIN = process.env.FRONT_ORIGIN || 'https://front-api-chatgpt-delfino.onrender.com';
 
 const corsOptions = {
   origin: FRONT_ORIGIN,                     // front-end
