@@ -1,3 +1,5 @@
+//services/conversationService.js
+
 import { v4 as uuid } from 'uuid';
 
 const TTL = Number(process.env.CHAT_TTL_MIN || 60) * 60_000;
@@ -28,4 +30,10 @@ export function appendMessage(id, message) {
 
 export function appendAssistant(id, answer) {
   appendMessage(id, { role: 'assistant', content: answer });
+}
+
+// services/conversationService.js
+export function getTail(id, max = 8) {
+  const msgs = getHistory(id) ?? [];
+  return msgs.slice(-max);           // los últimos 'max' mensajes
 }

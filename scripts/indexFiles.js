@@ -1,40 +1,59 @@
-import fs from 'fs/promises';
+// scripts/indexFiles.js
+import fs   from 'fs/promises';
 import path from 'path';
 import { listAllFiles, readFileContent } from '../services/fileService.js';
-import { createEmbedding } from '../services/embeddingsService.js';
+import { createEmbedding }              from '../services/embeddingsService.js';
 
-/* parámetros */
+/* =========  PARÁMETROS  =============================================== */
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || './vectorstore/index.json';
-const MAX_TOKENS   = +process.env.MAX_TOKENS_PER_CHUNK  || 6000;
-const CHAR_PER_TOK = +process.env.CHARS_PER_TOKEN       || 4;
-const MAX_CHARS    = MAX_TOKENS * CHAR_PER_TOK;              // ≈ 24 000
-const BATCH_ROWS   = +process.env.BATCH_ROWS_PER_CHUNK  || 200;
+const MAX_TOKENS       = +process.env.MAX_TOKENS_PER_CHUNK || 6000;
+const CHAR_PER_TOK     = +process.env.CHARS_PER_TOKEN      || 4;
+const MAX_CHARS        = MAX_TOKENS * CHAR_PER_TOK;            // ≈ 24k
+const BATCH_ROWS       = +process.env.BATCH_ROWS_PER_CHUNK || 200;
 
-await fs.mkdir(path.dirname(VECTORSTORE_PATH), { recursive: true });
+/* =========  EXEC  ===================================================== */
 
-const rowsOut = [];
+async function main () {
+  await fs.mkdir(path.dirname(VECTORSTORE_PATH), { recursive: true });
 
-for (const file of await listAllFiles()) {
-  const raw = await readFileContent(file);
-  const chunks = typeof raw === 'string' ? chunkText(raw) : chunkExcel(raw);
+  const rowsOut = [];
+  const files   = await listAllFiles();
 
-  for (const [i, text] of chunks.entries()) {
-    const safe = text.slice(0, MAX_CHARS);        // recorte defensivo
+  for (const file of files) {
+    console.log(`🗄  Procesando: ${file.path}`);
     try {
-      const embedding = await createEmbedding(safe);
-      rowsOut.push({ file, chunk: i, text: safe, embedding });
-      console.log(`✅ ${file} [${i}]`);
+      const raw    = await readFileContent(file);
+      const chunks = typeof raw === 'string' ? chunkText(raw) : chunkExcel(raw);
+
+      for (const [i, text] of chunks.entries()) {
+        const safe = text.slice(0, MAX_CHARS);   // recorte defensivo
+        const embedding = await createEmbedding(safe);
+        rowsOut.push({
+          fileId : file.id,        // ← ID de SharePoint
+          path   : file.path,      // opcional, para mostrar al usuario
+          chunk  : i,
+          text   : safe,
+          embedding
+        });
+        console.log(`   ✅  ${file.name} [${i}]`);
+      }
     } catch (err) {
-      console.error(`❌ ${file} [${i}] → ${err.message}`);
+      console.error(`   ❌  ${file.name}: ${err.message}`);
     }
   }
+
+  await fs.writeFile(VECTORSTORE_PATH, JSON.stringify(rowsOut, null, 2));
+  console.log(`🗂  Vectorstore guardado (${rowsOut.length} chunks)`);
 }
 
-await fs.writeFile(VECTORSTORE_PATH, JSON.stringify(rowsOut));
-console.log(`🗂  Vectorstore guardado (${rowsOut.length} chunks)`);
+main().catch(err => {
+  console.error('Error en indexFiles:', err);
+  process.exit(1);
+});
 
-/* helpers */
-function chunkText(str) {
+/* =========  HELPERS  ================================================== */
+
+function chunkText (str) {
   const out = [];
   for (let i = 0; i < str.length; i += MAX_CHARS) {
     out.push(str.slice(i, i + MAX_CHARS));
@@ -42,7 +61,7 @@ function chunkText(str) {
   return out;
 }
 
-function chunkExcel(book) {
+function chunkExcel (book) {
   const out = [];
   for (const [sheet, rows] of Object.entries(book)) {
     let chunk = `Hoja: ${sheet}\n`;

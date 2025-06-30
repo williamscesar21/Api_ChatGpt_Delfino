@@ -1,57 +1,68 @@
-// utils/buildPrompt.js
 /**
- * Construye el array `messages` para llamar a la API Chat de OpenAI.
- * Inserta un prompt de sistema adaptado a Delfino Tours II
- * y añade un mensaje-contexto por cada archivo relevante.
+ * Construye el array de `messages` para la API Chat de OpenAI.
  *
- * @param {string} userQuestion               Pregunta del usuario (último turno)
- * @param {Record<string, string|object>} fileContentsMap   Mapa { nombreArchivo: contenido }
+ * @param {string} userQuestion                       Pregunta del usuario (último turno)
+ * @param {Record<string,string|object>} fileContents Mapa { nombreArchivo: texto │ jsonString }
+ * @param {import("openai").ChatCompletionMessageParam[]} [history]  Historial reciente
  * @param {object} [options]
- * @param {number} [options.maxCharsPerFile]  Nº máximo de caracteres a incluir por archivo (default: 8 000)
+ * @param {number} [options.maxCharsPerFile=8_000]    Límite de caracteres por archivo
+ * @param {number} [options.maxHistory=8]             Nº máximo de mensajes previos
  * @returns {import("openai").ChatCompletionMessageParam[]}
  */
-export function buildMessages(userQuestion, fileContentsMap, options = {}) {
-  const MAX_CHARS = options.maxCharsPerFile ?? 8_000; // ≈ 2k tokens de margen
+export function buildMessages(
+  userQuestion,
+  fileContents,
+  history = [],
+  options = {}
+) {
+  const MAX_CHARS = options.maxCharsPerFile ?? 8_000; // ≈ 2 000 tokens
+  const MAX_HIST  = options.maxHistory     ?? 8;
 
-  // ───────────────────────── Prompt de sistema ──────────────────────────
-const systemPrompt = `
-Eres **DelfinoBot**, el asistente virtual oficial de *Delfino Tours II*, la empresa que opera excursiones marítimas por el archipiélago de La Maddalena y otros destinos costeros.
+  /* ────────────── Prompt de sistema ────────────── */
+  const systemPrompt = `
+Eres **DelfinoBot**, el asistente virtual oficial de *Delfino Tours II*.
 
-🎯  MISIÓN  
-Tu labor es ayudar a los clientes a obtener información clara y precisa sobre rutas, horarios, tarifas, servicios a bordo, políticas de reserva y cualquier otro dato incluido en la documentación interna de la empresa.
+🎯 Misión  
+Responde con información clara y precisa sobre rutas, horarios, tarifas,
+servicios a bordo, políticas de reserva y demás datos presentes en la
+documentación interna.
 
-📚  FUENTES AUTORIZADAS  
-Solo puedes utilizar la información que haya sido previamente indexada y proporcionada por Delfino Tours II (folletos PDF, tablas de Excel, guías internas, etc.).  
-No inventes datos ni completes con conocimiento externo.
+📚 Fuentes autorizadas  
+Solo puedes usar la información que se te proporcione en los documentos
+indexados. No inventes datos ni recurras a conocimiento externo.
 
-💬  ESTILO DE RESPUESTA  
-• Lenguaje amable, cercano y profesional.  
-• Explica en frases breves y fáciles de leer.  
-• Si el cliente solicita cifras o detalles concretos, cítalos tal cual aparecen en los documentos.  
-• Cuando corresponda, ofrece pasos siguientes claros (por ejemplo, «Para reservar, visite…»).
+💬 Estilo  
+• Lenguaje cordial y profesional.  
+• Frases breves y fáciles de leer.  
+• Ofrece pasos siguientes cuando proceda.
 
-🚫  FUERA DE ALCANCE  
-Si la respuesta **no** se encuentra en los documentos, responde exactamente:  
+🚫 Fuera de alcance  
+Si la respuesta **no** está en los documentos, di exactamente:  
 Lo siento, no dispongo de esa información.
 
-📄  FORMATO  
-No incluyas enlaces externos ni referencias académicas; muestra solo el contenido pertinente para el viajero.
+📄 Formato  
+No incluyas enlaces externos ni referencias académicas; solo el contenido
+útil para el viajero.
 `.trim();
 
-
-  // ──────────────── Mensajes-contexto (uno por archivo) ─────────────────
-  const docMessages = Object.entries(fileContentsMap).map(([name, content]) => ({
-    role: 'system',
-    content: `Contenido del archivo «${name}»:\n` +
-             `${typeof content === 'string'
-               ? content.slice(0, MAX_CHARS)
-               : JSON.stringify(content).slice(0, MAX_CHARS)}`
+  /* ────────────── Documentos relevantes ────────────── */
+  const docMessages = Object.entries(fileContents).map(([name, content]) => ({
+    role: "system",
+    content:
+      `Contenido del archivo «${name}»:\n` +
+      (typeof content === "string"
+        ? content.slice(0, MAX_CHARS)
+        : JSON.stringify(content).slice(0, MAX_CHARS)),
   }));
 
-  // ───────────────────────────── Chat completo ──────────────────────────
+  /* ────────────── Historial previo (máx MAX_HIST) ────────────── */
+  const tail = history.slice(-MAX_HIST);
+
+  /* ────────────── Mensajes finales ────────────── */
   return [
-    { role: 'system', content: systemPrompt },
+    { role: "system", content: systemPrompt },
     ...docMessages,
-    { role: 'user', content: userQuestion }
+    ...tail,
+    { role: "user", content: userQuestion },
   ];
 }

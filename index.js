@@ -1,48 +1,55 @@
-// index.js
-import 'dotenv/config';              // carga variables de entorno
-import express from 'express';
-import cors from 'cors';             // ⬅️ NUEVO
+import 'dotenv/config';
+import express  from 'express';
+import cors     from 'cors';
+import helmet   from 'helmet';
 
-import { basicAuth } from './middleware/basicAuth.js';
-import fileRoutes   from './routes/fileRoutes.js';
-import chatRoutes   from './routes/chatRoutes.js';
+import { basicAuth }        from './middleware/basicAuth.js';
+import chatRoutes           from './routes/chatRoutes.js';
+import fileRoutes           from './routes/fileRoutes.js';
+import { loadVectorStore }  from './services/vectorStoreService.js';
 
+/* ───────── preload vectorstore ───────── */
+await loadVectorStore();
+
+/* ───────── app + middlewares ───────── */
 const app = express();
-app.use(express.json());
+app.use(helmet());
+app.use(express.json({ limit: '4mb' }));
 
-/* ──────────────────────────────────────────────────────────
-   CORS
-   1. Responde automáticamente a las peticiones OPTIONS
-   2. Permite origen http://localhost:5173 (tu frontend Vite)
-   3. credentials: true para que el header Authorization viaje
-─────────────────────────────────────────────────────────────*/
-app.options('*', cors());            // pre-flight
-app.use(
-  cors({
-    origin: 'http://localhost:5173', // cambia al dominio de tu front en prod
-    credentials: true,
-  })
-);
+/* ───────── CORS (UNA sola configuración coherente) ───────── */
+const FRONT_ORIGIN = process.env.FRONT_ORIGIN || 'http://localhost:5173';
 
-/* ──────────────────────────────────────────────────────────
-   Autenticación Basic (se ejecuta DESPUÉS de CORS)
-─────────────────────────────────────────────────────────────*/
+const corsOptions = {
+  origin: FRONT_ORIGIN,                     // front-end
+  credentials: true,                        // permite Authorization Basic
+  methods: 'GET,POST,DELETE,OPTIONS',
+  allowedHeaders: 'Content-Type,Authorization',
+};
+
+app.use(cors(corsOptions));                 // aplica a todas las rutas
+app.options('*', cors(corsOptions));        // responde pre-flights con lo mismo
+
+/* ───────── Basic-Auth (después de CORS) ───────── */
 app.use(basicAuth);
 
-// Rutas protegidas
-app.use('/files', fileRoutes);
-app.use('/chat',  chatRoutes);
+/* ───────── rutas protegidas (prefijo /api) ───────── */
+app.use('/api', chatRoutes);   //  /api/chat/start  ·  /api/chat
+app.use('/api', fileRoutes);   //  /api/files
 
-// Fallback 404
-app.use((req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
+/* healthcheck */
+app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-// Manejo de errores global
-app.use((err, req, res, _next) => {
+/* 404 */
+app.use((_req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
+
+/* error global */
+app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || 'Error interno' });
 });
 
+/* ───────── listen ───────── */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
-  console.log(`🚀 API protegida con Basic Auth en http://localhost:${PORT}`)
+  console.log(`🚀 API en http://localhost:${PORT}  (front allowed: ${FRONT_ORIGIN})`)
 );
