@@ -41,7 +41,6 @@ Si la respuesta **no** está en los documentos, di exactamente:
 Lo siento, no dispongo de esa información.
 
 📄 Formato  
-Responde siempre en formato markdown.
 No incluyas enlaces externos ni referencias académicas; solo el contenido
 útil para el viajero.
 `.trim();
