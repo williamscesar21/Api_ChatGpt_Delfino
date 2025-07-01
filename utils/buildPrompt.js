@@ -1,72 +1,65 @@
 /**
- * Construye el array de `messages` para la API Chat de OpenAI.
+ * Genera el payload `messages` para la API Chat de OpenAI.
  *
- * @param {string} userQuestion                       Pregunta del usuario (último turno)
- * @param {Record<string,string|object>} fileContents Mapa { nombreArchivo: texto │ jsonString }
- * @param {import("openai").ChatCompletionMessageParam[]} [history]  Historial reciente
- * @param {object} [options]
- * @param {number} [options.maxCharsPerFile=8_000]    Límite de caracteres por archivo
- * @param {number} [options.maxHistory=8]             Nº máximo de mensajes previos
- * @returns {import("openai").ChatCompletionMessageParam[]}
+ * • Los documentos se trocean en bloques de ≤ MAX_CHARS y se envuelven
+ *   con marcas <<<Archivo|chunk:n>>> … <<<FIN>>> para que el modelo
+ *   pueda citarlos (Archivo.ext · chunk:n).
+ * • Siempre pedimos la respuesta en **Markdown** (sin indicar los
+ *   fences ```), de modo que las listas, encabezados, etc. se
+ *   formateen de forma legible en el front.
  */
+
+import type { ChatCompletionMessageParam } from "openai";
+
+interface Options {
+  maxCharsPerFile?: number; // default 8 000  (≈ 2 k tokens)
+  maxHistory?: number;      // default 8  turnos
+}
+
 export function buildMessages(
-  userQuestion,
-  fileContents,
-  history = [],
-  options = {}
-) {
-  const MAX_CHARS = options.maxCharsPerFile ?? 8_000; // ≈ 2 000 tokens
+  userQuestion: string,
+  fileContents: Record<string, string | object>,
+  history: ChatCompletionMessageParam[] = [],
+  options: Options = {}
+): ChatCompletionMessageParam[] {
+  const MAX_CHARS = options.maxCharsPerFile ?? 8_000;
   const MAX_HIST  = options.maxHistory     ?? 8;
 
-  /* ────────────── Prompt de sistema ────────────── */
+  /* ───────────── 1. Prompt de sistema ───────────── */
   const systemPrompt = `
-Eres **DelfinoBot**, el asistente virtual oficial de *Delfino Tours II*.
+Eres **DelfinoBot**, asistente virtual de *Delfino Tours II*.
 
-🎯 Misión  
-Responde con información clara y precisa sobre rutas, horarios, tarifas,
-servicios a bordo, políticas de reserva y demás datos presentes en la
-documentación interna.
-
-📚 Fuentes autorizadas  
-Solo puedes usar la información que se te proporcione en los documentos
-indexados. No inventes datos ni recurras a conocimiento externo.
-
-💬 Estilo  
-• Lenguaje cordial y profesional.  
-• Frases breves y fáciles de leer.  
-• Ofrece pasos siguientes cuando proceda.
-
-🚫 Fuera de alcance  
-Si la respuesta **no** está en los documentos, di exactamente:  
-Lo siento, no dispongo de esa información.
-
-📄 Formato  
-No incluyas enlaces externos ni referencias académicas; solo el contenido
-útil para el viajero.
-
-• Usa solo los fragmentos delimitados por
-  «<<<Archivo|chunk:x>>> … <<<FIN>>>».
-• Cuando cites información, indica la referencia entre paréntesis:
-  (Archivo.ext · chunk:x).
-• Si la respuesta no está en los documentos, responde exactamente:
-  "Lo siento, no dispongo de esa información."
-• Sé cordial, profesional y conciso.
+• Usa únicamente la información contenida entre las etiquetas
+  «<<<Archivo|chunk:n>>> … <<<FIN>>>».
+• Cada dato citado debe ir acompañado de su referencia:
+  (Archivo.ext · chunk:n).
+• Si no existe respuesta en los documentos, contesta exactamente:
+  Lo siento, no dispongo de esa información.
+• Responde SIEMPRE en **Markdown** claro y conciso
+  (listas, tablas, negritas, etc.).
 `.trim();
 
-  /* ────────────── Documentos relevantes ────────────── */
-  const docMessages = Object.entries(fileContents).map(([name, content]) => ({
-    role: "system",
-    content:
-      `Contenido del archivo «${name}»:\n` +
-      (typeof content === "string"
-        ? content.slice(0, MAX_CHARS)
-        : JSON.stringify(content).slice(0, MAX_CHARS)),
-  }));
+  /* ───────────── 2. Documentos troceados ───────────── */
+  let chunkIdx = 1;
+  const docMessages: ChatCompletionMessageParam[] = [];
 
-  /* ────────────── Historial previo (máx MAX_HIST) ────────────── */
+  for (const [name, raw] of Object.entries(fileContents)) {
+    const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+
+    for (let i = 0; i < text.length; i += MAX_CHARS) {
+      const slice = text.slice(i, i + MAX_CHARS);
+      docMessages.push({
+        role: "system",
+        content: `<<<${name}|chunk:${chunkIdx}>>>\n${slice}\n<<<FIN>>>`,
+      });
+      chunkIdx += 1;
+    }
+  }
+
+  /* ───────────── 3. Historial (últimos N) ───────────── */
   const tail = history.slice(-MAX_HIST);
 
-  /* ────────────── Mensajes finales ────────────── */
+  /* ───────────── 4. Ensamble final ───────────── */
   return [
     { role: "system", content: systemPrompt },
     ...docMessages,
