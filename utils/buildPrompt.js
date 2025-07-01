@@ -43,6 +43,14 @@ Lo siento, no dispongo de esa información.
 📄 Formato  
 No incluyas enlaces externos ni referencias académicas; solo el contenido
 útil para el viajero.
+
+• Usa solo los fragmentos delimitados por
+  «<<<Archivo|chunk:x>>> … <<<FIN>>>».
+• Cuando cites información, indica la referencia entre paréntesis:
+  (Archivo.ext · chunk:x).
+• Si la respuesta no está en los documentos, responde exactamente:
+  "Lo siento, no dispongo de esa información."
+• Sé cordial, profesional y conciso.
 `.trim();
 
   /* ────────────── Documentos relevantes ────────────── */
