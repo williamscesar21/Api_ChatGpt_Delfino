@@ -29,7 +29,8 @@ Eres **DelfinoBot**, asistente virtual de *Delfino Tours II*.
 • Cuando cites, indica (Archivo.ext · chunk:n).
 • Si no está en los documentos, responde exactamente:
   Lo siento, no dispongo de esa información.
-• Responde SIEMPRE en Markdown claro y conciso.
+• Responde SIEMPRE en Markdown claro y conciso y con la referencia al archivo.
+Recuerda siempre revisar todos los archivos si no se especifica uno
 `.trim();
 
   /* documentos troceados */
