@@ -6,7 +6,10 @@ import {
 } from "../services/embeddingsService.js";
 import { getRows }               from "../services/vectorStoreService.js";
 import { buildMessages }         from "../utils/buildPrompt.js";
-import { askOpenAI }             from "../services/openaiService.js";
+import {
+  askOpenAI,            // respuesta clásica
+  askOpenAIStream,      // respuesta por streaming
+} from "../services/openaiService.js";
 import { buildCacheKey, cache }  from "../services/cacheService.js";
 import {
   newChat,
@@ -15,42 +18,51 @@ import {
   getTail,
 } from "../services/conversationService.js";
 
-/*  Desactiva autocorrección:
-    · comenta la import
-    · comenta la llamada dentro del handler
+/*  Autocorrección desactivada
+// import { fixSpelling } from "../services/spellService.js";
 */
-// import { fixSpelling }       from "../services/spellService.js";
 
 const router   = Router();
-const TOP_K    = Number(process.env.TOP_K || 6);
+const TOP_K    = Number(process.env.TOP_K    || 6);
 const MAX_TAIL = Number(process.env.MAX_TAIL || 8);
 
 /* ──────────────────────────────────────────────
    POST /api/chat/start   →  { chatId }
 ───────────────────────────────────────────────*/
 router.post("/chat/start", (_req, res) => {
-  const chatId = newChat();
+  const chatId = newChat();          // crea conversación en memoria
   res.json({ chatId });
 });
 
 /* ──────────────────────────────────────────────
-   POST /api/chat  →  { answer }
+   POST /api/chat   body:
+   {
+     chatId: string,
+     message: string,
+     selectedIds?: string[],
+     stream?: boolean        // ← true = Server-Sent Events
+   }
 ───────────────────────────────────────────────*/
 router.post("/chat", async (req, res) => {
   try {
-    const { chatId, message, selectedIds = [] } = req.body;
+    const {
+      chatId,
+      message,
+      selectedIds = [],
+      stream = false,
+    } = req.body;
+
     if (!message?.trim()) {
       return res.status(400).json({ error: "Empty message" });
     }
 
-    /* 1️⃣  autocorrección ligera – DESACTIVADA
-    const fixed = await fixSpelling(message);
-    */
-    const fixed = message;        // usa la pregunta tal cual
+    /* 1️⃣  (opcional) autocorrección ligera */
+    // const fixed = await fixSpelling(message);
+    const fixed = message;
 
     /* 2️⃣  cache lookup */
     const key = buildCacheKey(fixed, selectedIds);
-    if (cache.has(key)) {
+    if (cache.has(key) && !stream) {
       const cached = cache.get(key);
       appendAssistant(chatId, cached);
       return res.json({ answer: cached, cached: true });
@@ -63,7 +75,7 @@ router.post("/chat", async (req, res) => {
     );
     const hits = similaritySearch(qEmb, pool, TOP_K);
 
-    /* 4️⃣  contexto agrupado por archivo */
+    /* 4️⃣  mapa archivo → fragmentos */
     const ctxMap = {};
     hits.forEach((h) => {
       ctxMap[h.path] = (ctxMap[h.path] || "") + "\n" + h.text;
@@ -72,11 +84,33 @@ router.post("/chat", async (req, res) => {
     /* 5️⃣  historial reciente */
     const history = getTail(chatId, MAX_TAIL);
 
-    /* 6️⃣  prompt + OpenAI */
+    /* 6️⃣  construir prompt */
     const messages = buildMessages(fixed, ctxMap, history);
-    const answer   = await askOpenAI(messages);
 
-    /* 7️⃣  guardar + cache */
+    /* ───────────  Streaming (SSE) ─────────── */
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.flushHeaders();
+
+      let full = "";
+      for await (const delta of askOpenAIStream(messages)) {
+        const chunk = delta.choices?.[0]?.delta?.content;
+        if (chunk) {
+          full += chunk;
+          res.write(`data:${chunk}\n\n`);      // envía trozos al front
+        }
+      }
+
+      appendMessage(chatId, { role: "user", content: fixed });
+      appendAssistant(chatId, full);
+      cache.set(key, full);
+      return res.end();
+    }
+
+    /* ───────────  Respuesta clásica ─────────── */
+    const answer = await askOpenAI(messages);
+
     appendMessage(chatId, { role: "user", content: fixed });
     appendAssistant(chatId, answer);
     cache.set(key, answer);
