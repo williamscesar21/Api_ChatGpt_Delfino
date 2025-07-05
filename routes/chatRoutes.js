@@ -7,30 +7,34 @@ import {
 import { getRows }               from "../services/vectorStoreService.js";
 import { buildMessages }         from "../utils/buildPrompt.js";
 import { askOpenAI }             from "../services/openaiService.js";
-import { fixSpelling }           from "../services/spellService.js";
 import { buildCacheKey, cache }  from "../services/cacheService.js";
 import {
-  newChat,            // ← crea conversación
+  newChat,
   appendMessage,
   appendAssistant,
   getTail,
 } from "../services/conversationService.js";
 
-const router    = Router();
-const TOP_K     = Number(process.env.TOP_K || 6);
-const MAX_TAIL  = Number(process.env.MAX_TAIL || 8);
+/*  Desactiva autocorrección:
+    · comenta la import
+    · comenta la llamada dentro del handler
+*/
+// import { fixSpelling }       from "../services/spellService.js";
+
+const router   = Router();
+const TOP_K    = Number(process.env.TOP_K || 6);
+const MAX_TAIL = Number(process.env.MAX_TAIL || 8);
 
 /* ──────────────────────────────────────────────
    POST /api/chat/start   →  { chatId }
 ───────────────────────────────────────────────*/
 router.post("/chat/start", (_req, res) => {
-  const chatId = newChat();      // se guarda en memoria
+  const chatId = newChat();
   res.json({ chatId });
 });
 
 /* ──────────────────────────────────────────────
-   POST /api/chat         →  { answer }
-   body: { chatId, message, selectedIds?: string[] }
+   POST /api/chat  →  { answer }
 ───────────────────────────────────────────────*/
 router.post("/chat", async (req, res) => {
   try {
@@ -39,8 +43,10 @@ router.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "Empty message" });
     }
 
-    /* 1️⃣  autocorrección ligera */
+    /* 1️⃣  autocorrección ligera – DESACTIVADA
     const fixed = await fixSpelling(message);
+    */
+    const fixed = message;        // usa la pregunta tal cual
 
     /* 2️⃣  cache lookup */
     const key = buildCacheKey(fixed, selectedIds);
@@ -57,20 +63,20 @@ router.post("/chat", async (req, res) => {
     );
     const hits = similaritySearch(qEmb, pool, TOP_K);
 
-    /* 4️⃣  construye mapa archivo → texto relevante */
+    /* 4️⃣  contexto agrupado por archivo */
     const ctxMap = {};
     hits.forEach((h) => {
       ctxMap[h.path] = (ctxMap[h.path] || "") + "\n" + h.text;
     });
 
     /* 5️⃣  historial reciente */
-    const history = getTail(chatId, MAX_TAIL);   // [{role,content}…]
+    const history = getTail(chatId, MAX_TAIL);
 
-    /* 6️⃣  prompt y llamada a OpenAI */
+    /* 6️⃣  prompt + OpenAI */
     const messages = buildMessages(fixed, ctxMap, history);
     const answer   = await askOpenAI(messages);
 
-    /* 7️⃣  guardar y cachear */
+    /* 7️⃣  guardar + cache */
     appendMessage(chatId, { role: "user", content: fixed });
     appendAssistant(chatId, answer);
     cache.set(key, answer);
