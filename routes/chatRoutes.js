@@ -1,47 +1,43 @@
+// routes/chatRoutes.js
 import { Router } from "express";
 
 import {
   createEmbedding,
-  similaritySearch,
+  similaritySearch
 } from "../services/embeddingsService.js";
-import { getRows }               from "../services/vectorStoreService.js";
-import { buildMessages }         from "../utils/buildPrompt.js";
+import { getRows }           from "../services/vectorStoreService.js";
+import { buildMessages }     from "../utils/buildPrompt.js";
 import {
-  askOpenAI,            // respuesta clásica
-  askOpenAIStream,      // respuesta por streaming
+  askOpenAI,          // respuesta completa
+  askOpenAIStream     // respuesta mediante streaming
 } from "../services/openaiService.js";
-import { buildCacheKey, cache }  from "../services/cacheService.js";
+import { buildCacheKey, cache } from "../services/cacheService.js";
 import {
   newChat,
   appendMessage,
   appendAssistant,
-  getTail,
+  getTail
 } from "../services/conversationService.js";
 
-/*  Autocorrección desactivada
+/*  Autocorrección (si la re-activas, descomenta)
 // import { fixSpelling } from "../services/spellService.js";
 */
 
 const router   = Router();
-const TOP_K    = Number(process.env.TOP_K    || 6);
-const MAX_TAIL = Number(process.env.MAX_TAIL || 8);
+const TOP_K    = Number(process.env.TOP_K    || 6);   // chunks por vector-search
+const MAX_TAIL = Number(process.env.MAX_TAIL || 8);   // mensajes previos
+const KEEPALIVE_MS = 15_000;                          // ping SSE
 
 /* ──────────────────────────────────────────────
-   POST /api/chat/start   →  { chatId }
+   POST /api/chat/start  → { chatId }
 ───────────────────────────────────────────────*/
 router.post("/chat/start", (_req, res) => {
-  const chatId = newChat();          // crea conversación en memoria
-  res.json({ chatId });
+  res.json({ chatId: newChat() });
 });
 
 /* ──────────────────────────────────────────────
-   POST /api/chat   body:
-   {
-     chatId: string,
-     message: string,
-     selectedIds?: string[],
-     stream?: boolean        // ← true = Server-Sent Events
-   }
+   POST /api/chat
+   body: { chatId, message, selectedIds?, stream? }
 ───────────────────────────────────────────────*/
 router.post("/chat", async (req, res) => {
   try {
@@ -49,76 +45,89 @@ router.post("/chat", async (req, res) => {
       chatId,
       message,
       selectedIds = [],
-      stream = false,
+      stream = false        // ← true = SSE
     } = req.body;
 
     if (!message?.trim()) {
       return res.status(400).json({ error: "Empty message" });
     }
 
-    /* 1️⃣  (opcional) autocorrección ligera */
+    /* 1⃣  (opcional) autocorrección */
     // const fixed = await fixSpelling(message);
     const fixed = message;
 
-    /* 2️⃣  cache lookup */
-    const key = buildCacheKey(fixed, selectedIds);
-    if (cache.has(key) && !stream) {
-      const cached = cache.get(key);
+    /* 2⃣  cache (solo si NO es streaming) */
+    const cacheKey = buildCacheKey(fixed, selectedIds);
+    if (!stream && cache.has(cacheKey)) {
+      const cached = cache.get(cacheKey);
       appendAssistant(chatId, cached);
       return res.json({ answer: cached, cached: true });
     }
 
-    /* 3️⃣  embedding + búsqueda vectorial */
+    /* 3⃣  embedding + similarity search */
     const qEmb = await createEmbedding(fixed);
     const pool = getRows().filter(
-      (r) => !selectedIds.length || selectedIds.includes(r.fileId)
+      r => !selectedIds.length || selectedIds.includes(r.fileId)
     );
     const hits = similaritySearch(qEmb, pool, TOP_K);
 
-    /* 4️⃣  mapa archivo → fragmentos */
+    /* 4⃣  reúne contexto por archivo */
     const ctxMap = {};
-    hits.forEach((h) => {
+    hits.forEach(h => {
       ctxMap[h.path] = (ctxMap[h.path] || "") + "\n" + h.text;
     });
 
-    /* 5️⃣  historial reciente */
+    /* 5⃣  historial corto */
     const history = getTail(chatId, MAX_TAIL);
 
-    /* 6️⃣  construir prompt */
+    /* 6⃣  prompt listo */
     const messages = buildMessages(fixed, ctxMap, history);
 
-    /* ───────────  Streaming (SSE) ─────────── */
+    /* ───────── STREAM (SSE) ───────── */
     if (stream) {
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.flushHeaders();
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      });
+      // En algunos hosts flushHeaders no existe
+      if (res.flushHeaders) res.flushHeaders();
 
-      let full = "";
-      for await (const delta of askOpenAIStream(messages)) {
-        const chunk = delta.choices?.[0]?.delta?.content;
-        if (chunk) {
-          full += chunk;
-          res.write(`data:${chunk}\n\n`);      // envía trozos al front
+      /* keep-alive para proxies / browsers */
+      const ping = setInterval(() => res.write(":\n\n"), KEEPALIVE_MS);
+
+      let fullAnswer = "";
+
+      try {
+        for await (const chunk of askOpenAIStream(messages)) {
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (!delta) continue;            // ignora pings de OpenAI
+          fullAnswer += delta;
+          res.write(`data:${delta}\n\n`);
         }
+      } finally {
+        clearInterval(ping);
       }
 
+      /* guarda conversación y cachea */
       appendMessage(chatId, { role: "user", content: fixed });
-      appendAssistant(chatId, full);
-      cache.set(key, full);
+      appendAssistant(chatId, fullAnswer);
+      cache.set(cacheKey, fullAnswer);
+
       return res.end();
     }
 
-    /* ───────────  Respuesta clásica ─────────── */
+    /* ───────── RESPUESTA CLÁSICA (no stream) ───────── */
     const answer = await askOpenAI(messages);
 
     appendMessage(chatId, { role: "user", content: fixed });
     appendAssistant(chatId, answer);
-    cache.set(key, answer);
+    cache.set(cacheKey, answer);
 
     res.json({ answer });
   } catch (err) {
     console.error("POST /chat error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err?.message || "Internal error" });
   }
 });
 
