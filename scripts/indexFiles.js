@@ -36,33 +36,46 @@ function chunkText(str) { return splitToFit(str); }
 
 function chunkExcel(book) {
   const out = [];
+  const fits = (t) => countTokens(t) <= MAX_TOKENS_EMB;
+
   for (const [sheet, rows] of Object.entries(book)) {
+    // Recorremos la hoja de abajo → arriba
     let chunk = `Hoja: ${sheet}\n`;
     let added = 0;
 
-    for (const row of rows) {
-      const line = Object.values(row)
-        .map(String)
-        .map((v) => v.trim())
-        .filter((v) => v && v.length < 200)
-        .join(" | ");
+    for (let r = rows.length - 1; r >= 0; r--) {
+      const row = rows[r];
 
-      if (!line) continue;
+      // Recorremos cada celda de la fila (izq → der)
+      for (const [col, raw] of Object.entries(row)) {
+        const value = String(raw).trim();
+        if (!value || value.length > 200) continue;   // filtrado básico
 
-      if (countTokens(chunk + line) > MAX_TOKENS_EMB) {
-        out.push(chunk);
-        chunk = `Hoja: ${sheet} (cont.)\n`;
-      }
-      chunk += line + "\n";
-      if (++added % BATCH_ROWS === 0 && chunk.trim()) {
-        out.push(chunk);
-        chunk = `Hoja: ${sheet} (cont.)\n`;
+        // Ejemplo: "Fila 42 Col B: Tornillo M6 x 20 mm"
+        const line = `Fila ${r + 1} Col ${col}: ${value}`;
+
+        // Si agregar la línea supera el límite, corta el chunk
+        if (!fits(chunk + line + "\n")) {
+          out.push(chunk);
+          chunk = `Hoja: ${sheet} (cont.)\n`;
+        }
+        chunk += line + "\n";
+
+        // Volcado por lotes para evitar chunks enormes
+        if (++added % BATCH_ROWS === 0 && chunk.trim()) {
+          out.push(chunk);
+          chunk = `Hoja: ${sheet} (cont.)\n`;
+        }
       }
     }
+
     if (chunk.trim()) out.push(chunk);
   }
-  return out.flatMap(splitToFit);     // verifica cada trozo
+
+  // Re-verifica cada trozo por si quedó alguno muy grande
+  return out.flatMap(splitToFit);
 }
+
 
 /* =========  EXEC  ===================================================== */
 (async () => {
