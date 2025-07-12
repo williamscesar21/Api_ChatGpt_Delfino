@@ -1,10 +1,11 @@
-import { Router } from "express";
+import { Router }     from "express";
+import { spawn }      from "child_process";
+import path           from "path";
 import { listAllFiles } from "../services/fileService.js";
-import { reindexVectorStore } from "../services/vectorStoreService.js";
 
 const router = Router();
 
-/* GET /api/files → lista todos los archivos */
+/* ---------- GET /api/files   → lista los archivos -------------------- */
 router.get("/files", async (_req, res) => {
   try {
     const files = await listAllFiles();
@@ -15,14 +16,32 @@ router.get("/files", async (_req, res) => {
   }
 });
 
-/* POST /api/files/reindex → reconstruye el vector-store */
-router.post("/files/reindex", async (_req, res) => {
+/* ---------- POST /api/files/reindex   → dispara npm run index -------- */
+router.post("/files/reindex", (_req, res) => {
   try {
-    await reindexVectorStore();          // función mostrada más abajo
-    res.json({ ok: true });
+    /* 1️⃣  lanza el comando */
+    const cmd   = process.platform === "win32" ? "npm.cmd" : "npm";
+    const child = spawn(
+      cmd,
+      ["run", "index"],                       // = npm run index
+      {
+        cwd:      path.resolve("."),          // raíz del proyecto
+        detached: true,                       // se independiza del proceso web
+        stdio:    "ignore",                   // no ocupa stdout de Express
+        env: {
+          ...process.env,
+          NODE_OPTIONS: "--max-old-space-size=2048", // heap extra solo al job
+        },
+      }
+    );
+
+    child.unref();        // deja correr al hijo aunque Express termine
+
+    /* 2️⃣  responde de inmediato */
+    res.status(202).json({ ok: true, msg: "Reindex started" });
   } catch (err) {
-    console.error("POST /files/reindex error:", err);
-    res.status(500).json({ error: "Cannot reindex files" });
+    console.error("POST /files/reindex spawn error:", err);
+    res.status(500).json({ error: "Cannot start reindex job" });
   }
 });
 
