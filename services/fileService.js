@@ -1,154 +1,153 @@
-// services/fileService.js
+/* ----------------------------------------------------------------------
+   Servicio SharePoint: Word .doc | .docx | Excel .xls | .xlsx
+---------------------------------------------------------------------- */
+
 import axios   from "axios";
 import qs      from "qs";
 import mammoth from "mammoth";
 import xlsx    from "xlsx";
+import WordExtractor from "word-extractor";
+import officeParser  from "officeparser";
+import fs   from "fs/promises";
+import os   from "os";
+import path from "path";
 
-/* =========  ENV  ======================================================= */
+/* =========  ENV & AUTH  ============================================== */
 const {
   AZURE_TENANT_ID,
   AZURE_CLIENT_ID,
   AZURE_CLIENT_SECRET,
-  SITE_ID,                     // p.ej. panamajourneys.sharepoint.com,xxx,yyy
-  DRIVE_ID,                    // id de la biblioteca “Documents”
+  SITE_ID,
+  DRIVE_ID,
   SHAREPOINT_ROOT_PATH = "Prueba API",
   GRAPH_SCOPE = "https://graph.microsoft.com/.default",
 } = process.env;
 
-/* =========  AUTH  ====================================================== */
-let cachedToken = { value: null, exp: 0 };
+let cache = { token: null, exp: 0 };
 
-async function getAccessToken() {
+async function token() {
   const now = Date.now() / 1000;
-  if (cachedToken.value && cachedToken.exp - 60 > now) return cachedToken.value;
+  if (cache.token && cache.exp - 60 > now) return cache.token;
 
-  const url = `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`;
-  const body = qs.stringify({
-    grant_type:    "client_credentials",
-    client_id:     AZURE_CLIENT_ID,
-    client_secret: AZURE_CLIENT_SECRET,
-    scope:         GRAPH_SCOPE,
-  });
-
-  const { data } = await axios.post(url, body, {
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  });
-
-  cachedToken = { value: data.access_token, exp: now + data.expires_in };
-  return cachedToken.value;
+  const { data } = await axios.post(
+    `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`,
+    qs.stringify({
+      grant_type:    "client_credentials",
+      client_id:     AZURE_CLIENT_ID,
+      client_secret: AZURE_CLIENT_SECRET,
+      scope:         GRAPH_SCOPE,
+    }),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+  cache = { token: data.access_token, exp: now + data.expires_in };
+  return cache.token;
 }
+const authHeaders = async () => ({ Authorization: `Bearer ${await token()}` });
 
-async function authHeaders() {
-  const token = await getAccessToken();
-  return { Authorization: `Bearer ${token}` };
-}
-
-/* =========  HELPERS  =================================================== */
+/* =========  HELPERS  ================================================== */
 const FILE_REGEX = /\.(docx?|xlsx?)$/i;
-const buildPath  = (segments) => segments.map(encodeURIComponent).join("/");
+const buildPath  = (arr) => arr.map(encodeURIComponent).join("/");
 
-/* =========  FILE LISTING  ============================================= */
+const normalize = (txt) => {
+  if (txt == null) return "";
+  if (typeof txt === "string") return txt;
+  if (Buffer.isBuffer(txt))     return txt.toString("utf8");
+  if (Array.isArray(txt))       return txt.join("\n");
+  if (typeof txt === "object")  return JSON.stringify(txt);
+  return String(txt);
+};
 
-async function listChildren(folderPath = "") {
-  const headers = await authHeaders();
-
-  const url = folderPath
+/* =========  LISTADO RECURSIVO  ======================================= */
+async function listChildren(folder = "") {
+  const url = folder
     ? `https://graph.microsoft.com/v1.0/sites/${SITE_ID}` +
-      `/drives/${DRIVE_ID}/root:/${buildPath(folderPath.split("/"))}:/children`
+      `/drives/${DRIVE_ID}/root:/${buildPath(folder.split("/"))}:/children`
     : `https://graph.microsoft.com/v1.0/sites/${SITE_ID}` +
       `/drives/${DRIVE_ID}/root/children`;
 
-  const { data } = await axios.get(url, { headers });
-  return data.value; // Array<DriveItem>
+  const { data } = await axios.get(url, { headers: await authHeaders() });
+  return data.value;
 }
 
-async function collectFilesRecursively(basePath = "") {
-  const items = await listChildren(basePath);
-  let files = [];
+async function walk(base = "") {
+  const items = await listChildren(base);
+  let out     = [];
 
-  for (const item of items) {
-    if (item.folder) {
-      const nextPath = basePath ? `${basePath}/${item.name}` : item.name;
-      files = files.concat(await collectFilesRecursively(nextPath));
-    } else if (item.file && FILE_REGEX.test(item.name)) {
-      files.push({
-        id:     item.id,
-        name:   item.name,
-        path:   basePath ? `${basePath}/${item.name}` : item.name,
-        webUrl: item.webUrl,
+  for (const it of items) {
+    if (it.folder) {
+      out = out.concat(await walk(base ? `${base}/${it.name}` : it.name));
+    } else if (it.file && FILE_REGEX.test(it.name)) {
+      out.push({
+        id:   it.id,
+        name: it.name,
+        path: base ? `${base}/${it.name}` : it.name,
       });
     }
   }
-  return files;
+  return out;
 }
 
-/** Devuelve la lista completa de archivos Word/Excel bajo la carpeta raíz */
-export async function listAllFiles() {
-  const root = SHAREPOINT_ROOT_PATH.trim();
-  return await collectFilesRecursively(root);
-}
+export const listAllFiles = () => walk(SHAREPOINT_ROOT_PATH.trim());
 
-/* =========  FILE DOWNLOAD  ============================================ */
-
+/* =========  DESCARGA + PARSEO  ======================================= */
 export async function readFileContent(file) {
-  if (!FILE_REGEX.test(file.name)) {
+  if (!FILE_REGEX.test(file.name))
     throw new Error(`Extensión no soportada: ${file.name}`);
-  }
 
-  const headers =
-    await authHeaders();
-  const url =
+  /* ----- descarga ----- */
+  const { data: buf } = await axios.get(
     `https://graph.microsoft.com/v1.0/sites/${SITE_ID}` +
-    `/drives/${DRIVE_ID}/items/${file.id}/content`;
+    `/drives/${DRIVE_ID}/items/${file.id}/content`,
+    { headers: await authHeaders(), responseType: "arraybuffer" }
+  );
 
-  const { data: buffer } = await axios.get(url, {
-    headers,
-    responseType: "arraybuffer",
-  });
-
-  /* ---------- Word (.doc / .docx) ---------------- */
-  if (/\.docx?$/i.test(file.name)) {
-    const { value } = await mammoth.extractRawText({ buffer });
-    return value.trim(); // string
+  /* ---------- .docx ---------- */
+  if (/\.docx$/i.test(file.name)) {
+    const { value } = await mammoth.extractRawText({ buffer: buf });
+    return value.trim();
   }
 
-  /* ---------- Excel (.xls / .xlsx) --------------- */
-  const workbook = xlsx.read(buffer, { type: "buffer" });
-  const sheets   = {};
+  /* ---------- .doc ---------- */
+  if (/\.doc$/i.test(file.name)) {
+    const tmpDir  = await fs.mkdtemp(path.join(os.tmpdir(), "doc-"));
+    const tmpPath = path.join(tmpDir, `${Date.now()}.doc`);
+    await fs.writeFile(tmpPath, buf);
 
-  workbook.SheetNames.forEach((name) => {
-    sheets[name] = xlsx.utils.sheet_to_json(workbook.Sheets[name], {
+    try {
+      /* 1) word-extractor */
+      try {
+        const doc    = await new WordExtractor().extract(tmpPath);
+        const body   = normalize(doc.getBody()).trim();
+        if (body) return body;
+      } catch {/* ignore & fallback */}
+
+      /* 2) officeparser */
+      return await new Promise((res, rej) =>
+        officeParser.parseOffice(tmpPath, (err, text) =>
+          err ? rej(err) : res(normalize(text).trim())
+        )
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  /* ---------- Excel ---------- */
+  const wb   = xlsx.read(buf, { type: "buffer" });
+  const book = {};
+
+  wb.SheetNames.forEach((sheet) => {
+    const rows = xlsx.utils.sheet_to_json(wb.Sheets[sheet], {
+      header: 1,
       defval: "",
+      raw: false,
     });
+    book[sheet] = rows.map((arr) =>
+      arr.reduce((o, v, i) => {
+        o[xlsx.utils.encode_col(i)] = v;
+        return o;
+      }, {})
+    );
   });
-  return sheets; // object → lo convertiremos a texto en getFileText
-}
-
-/* =========  NUEVO: getFileText ======================================== */
-/**
- * Convierte cualquier archivo soportado a texto plano.
- * - Word → texto.
- * - Excel → CSV multi-sheet (una hoja bajo la otra).
- */
-export async function getFileText(file) {
-  const content = await readFileContent(file);
-
-  // Word → ya viene en string
-  if (typeof content === "string") return content;
-
-  // Excel → convertir a CSV-like texto
-  const lines = [];
-  for (const [sheetName, rows] of Object.entries(content)) {
-    lines.push(`>>> Hoja: ${sheetName}`);
-    if (!rows.length) continue;
-
-    const headers = Object.keys(rows[0]);
-    lines.push(headers.join("\t")); // encab.
-    rows.forEach((r) => {
-      const line = headers.map((h) => (r[h] ?? "")).join("\t");
-      lines.push(line);
-    });
-    lines.push(""); // línea en blanco tras cada hoja
-  }
-  return lines.join("\n").trim();
+  return book;
 }
