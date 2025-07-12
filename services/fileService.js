@@ -1,5 +1,9 @@
 /* ----------------------------------------------------------------------
-   Servicio SharePoint: Word .doc | .docx | Excel .xls | .xlsx
+   services/fileService.js
+   ----------------------------------------------------------------------
+   • listAllFiles()      → array de metadatos DriveItem (Word/Excel)
+   • readFileContent(f)  → string   |  { [sheet]: Row[] }
+   • getFileText(f)      → SIEMPRE string (Word directo, Excel→TSV)
 ---------------------------------------------------------------------- */
 
 import axios   from "axios";
@@ -25,24 +29,26 @@ const {
 
 let cache = { token: null, exp: 0 };
 
-async function token() {
+async function getToken() {
   const now = Date.now() / 1000;
   if (cache.token && cache.exp - 60 > now) return cache.token;
 
-  const { data } = await axios.post(
-    `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`,
-    qs.stringify({
-      grant_type:    "client_credentials",
-      client_id:     AZURE_CLIENT_ID,
-      client_secret: AZURE_CLIENT_SECRET,
-      scope:         GRAPH_SCOPE,
-    }),
-    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-  );
+  const url  = `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`;
+  const body = qs.stringify({
+    grant_type:    "client_credentials",
+    client_id:     AZURE_CLIENT_ID,
+    client_secret: AZURE_CLIENT_SECRET,
+    scope:         GRAPH_SCOPE,
+  });
+
+  const { data } = await axios.post(url, body, {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+
   cache = { token: data.access_token, exp: now + data.expires_in };
   return cache.token;
 }
-const authHeaders = async () => ({ Authorization: `Bearer ${await token()}` });
+const authHeaders = async () => ({ Authorization: `Bearer ${await getToken()}` });
 
 /* =========  HELPERS  ================================================== */
 const FILE_REGEX = /\.(docx?|xlsx?)$/i;
@@ -75,7 +81,8 @@ async function walk(base = "") {
 
   for (const it of items) {
     if (it.folder) {
-      out = out.concat(await walk(base ? `${base}/${it.name}` : it.name));
+      const next = base ? `${base}/${it.name}` : it.name;
+      out = out.concat(await walk(next));
     } else if (it.file && FILE_REGEX.test(it.name)) {
       out.push({
         id:   it.id,
@@ -97,7 +104,7 @@ export async function readFileContent(file) {
   /* ----- descarga ----- */
   const { data: buf } = await axios.get(
     `https://graph.microsoft.com/v1.0/sites/${SITE_ID}` +
-    `/drives/${DRIVE_ID}/items/${file.id}/content`,
+      `/drives/${DRIVE_ID}/items/${file.id}/content`,
     { headers: await authHeaders(), responseType: "arraybuffer" }
   );
 
@@ -116,15 +123,15 @@ export async function readFileContent(file) {
     try {
       /* 1) word-extractor */
       try {
-        const doc    = await new WordExtractor().extract(tmpPath);
-        const body   = normalize(doc.getBody()).trim();
-        if (body) return body;
-      } catch {/* ignore & fallback */}
+        const doc  = await new WordExtractor().extract(tmpPath);
+        const txt  = normalize(doc.getBody()).trim();
+        if (txt) return txt;
+      } catch {/* fallback */}
 
       /* 2) officeparser */
       return await new Promise((res, rej) =>
-        officeParser.parseOffice(tmpPath, (err, text) =>
-          err ? rej(err) : res(normalize(text).trim())
+        officeParser.parseOffice(tmpPath, (err, t) =>
+          err ? rej(err) : res(normalize(t).trim())
         )
       );
     } finally {
@@ -150,4 +157,27 @@ export async function readFileContent(file) {
     );
   });
   return book;
+}
+
+/* =========  TEXTO PLANO (Word ↔ Excel) =============================== */
+export async function getFileText(file) {
+  const content = await readFileContent(file);
+
+  /* Word → ya es string */
+  if (typeof content === "string") return content;
+
+  /* Excel → lo convertimos a TSV separado por tabuladores */
+  const out = [];
+  for (const [sheet, rows] of Object.entries(content)) {
+    out.push(`>>> Hoja: ${sheet}`);
+    if (!rows.length) { out.push(""); continue; }
+
+    const cols = Object.keys(rows[0]);
+    out.push(cols.join("\t"));
+    rows.forEach((r) => {
+      out.push(cols.map((c) => (r[c] ?? "")).join("\t"));
+    });
+    out.push("");            // línea en blanco tras cada hoja
+  }
+  return out.join("\n").trim();
 }
