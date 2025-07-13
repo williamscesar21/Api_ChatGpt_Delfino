@@ -1,16 +1,14 @@
-// services/fileService.js
-
 import axios from "axios";
 import qs from "qs";
 import mammoth from "mammoth";
-import xlsx from "xlsx";
 import WordExtractor from "word-extractor";
 import officeParser from "officeparser";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import ExcelJS from "exceljs";
 
-/* =========  ENV & AUTH  ============================================== */
+// ========== ENV & AUTH ==========
 const {
   AZURE_TENANT_ID,
   AZURE_CLIENT_ID,
@@ -21,20 +19,16 @@ const {
   GRAPH_SCOPE = "https://graph.microsoft.com/.default",
 } = process.env;
 
-/** Cache simple para OAuth token */
 let cache = { token: null, exp: 0 };
-
 async function getToken() {
   const now = Date.now() / 1000;
-  if (cache.token && cache.exp - 60 > now) {
-    return cache.token;
-  }
+  if (cache.token && cache.exp - 60 > now) return cache.token;
   const url = `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`;
   const body = qs.stringify({
-    grant_type: "client_credentials",
-    client_id: AZURE_CLIENT_ID,
+    grant_type:    "client_credentials",
+    client_id:     AZURE_CLIENT_ID,
     client_secret: AZURE_CLIENT_SECRET,
-    scope: GRAPH_SCOPE,
+    scope:         GRAPH_SCOPE,
   });
   const { data } = await axios.post(url, body, {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -42,17 +36,16 @@ async function getToken() {
   cache = { token: data.access_token, exp: now + data.expires_in };
   return cache.token;
 }
-
 async function authHeaders() {
   const token = await getToken();
   return { Authorization: `Bearer ${token}` };
 }
 
-/* =========  FILE FILTER & PATH BUILD ================================= */
+// ========== FILE LISTING ==========
 const FILE_REGEX = /\.(docx?|xlsx?)$/i;
-const buildPath = (segments) => segments.map(encodeURIComponent).join("/");
-
-/* =========  LISTADO RECURSIVO  ======================================= */
+function buildPath(segs) {
+  return segs.map(encodeURIComponent).join("/");
+}
 async function listChildren(folder = "") {
   const headers = await authHeaders();
   const url = folder
@@ -60,90 +53,85 @@ async function listChildren(folder = "") {
       `/drives/${DRIVE_ID}/root:/${buildPath(folder.split("/"))}:/children`
     : `https://graph.microsoft.com/v1.0/sites/${SITE_ID}` +
       `/drives/${DRIVE_ID}/root/children`;
-
   const { data } = await axios.get(url, { headers });
-  return data.value; // Array<DriveItem>
+  return data.value;
 }
-
 async function walk(base = "") {
   const items = await listChildren(base);
-  let files = [];
+  let out = [];
   for (const it of items) {
     if (it.folder) {
       const next = base ? `${base}/${it.name}` : it.name;
-      files = files.concat(await walk(next));
+      out = out.concat(await walk(next));
     } else if (it.file && FILE_REGEX.test(it.name)) {
-      files.push({
-        id: it.id,
+      out.push({
+        id:   it.id,
         name: it.name,
         path: base ? `${base}/${it.name}` : it.name,
       });
     }
   }
-  return files;
+  return out;
+}
+/** Lista todos los Word/Excel bajo la carpeta raíz */
+export function listAllFiles() {
+  return walk(SHAREPOINT_ROOT_PATH.trim());
 }
 
-/** Devuelve lista de todos los archivos .doc/.docx/.xlsx bajo la carpeta raíz */
-export async function listAllFiles() {
-  return await walk(SHAREPOINT_ROOT_PATH.trim());
-}
-
-/* =========  UTILS DE NORMALIZACIÓN  ================================= */
-const normalize = (txt) => {
-  if (txt == null) return "";
-  if (typeof txt === "string") return txt;
-  if (Buffer.isBuffer(txt)) return txt.toString("utf8");
-  if (Array.isArray(txt)) return txt.join("\n");
-  if (typeof txt === "object") return JSON.stringify(txt);
-  return String(txt);
+// ========== UTILS ========== 
+const normalize = (v) => {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (Buffer.isBuffer(v)) return v.toString("utf8");
+  if (Array.isArray(v)) return v.join("\n");
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
 };
 
-/* =========  DESCARGA + PARSEO  ======================================= */
+// ========== READ & PARSE ==========
 /**
- * readFileContent:
- *  - .docx  → string
- *  - .doc   → string (WordExtractor + fallback officeParser)
- *  - .xlsx  → { [sheetName]: RowObject[] }
+ * Devuelve:
+ *  - String para .docx/.doc
+ *  - ExcelJS WorkbookReader para .xlsx
  */
 export async function readFileContent(file) {
   if (!FILE_REGEX.test(file.name)) {
     throw new Error(`Extensión no soportada: ${file.name}`);
   }
-
-  // Descarga el contenido como arraybuffer
-  const { data: buffer } = await axios.get(
+  const url =
     `https://graph.microsoft.com/v1.0/sites/${SITE_ID}` +
-      `/drives/${DRIVE_ID}/items/${file.id}/content`,
-    { headers: await authHeaders(), responseType: "arraybuffer" }
-  );
+    `/drives/${DRIVE_ID}/items/${file.id}/content`;
 
-  // DOCX → Mammoth
+  // --- DOCX
   if (/\.docx$/i.test(file.name)) {
-    const { value } = await mammoth.extractRawText({ buffer });
+    const { data: buf } = await axios.get(url, {
+      headers: await authHeaders(),
+      responseType: "arraybuffer",
+    });
+    const { value } = await mammoth.extractRawText({ buffer: buf });
     return value.trim();
   }
 
-  // DOC → WordExtractor, fallback a officeParser
+  // --- DOC
   if (/\.doc$/i.test(file.name)) {
-    // Crea archivo temporal
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "doc-"));
+    const { data: buf } = await axios.get(url, {
+      headers: await authHeaders(),
+      responseType: "arraybuffer",
+    });
+    const tmpDir  = await fs.mkdtemp(path.join(os.tmpdir(), "doc-"));
     const tmpPath = path.join(tmpDir, `${Date.now()}.doc`);
-    await fs.writeFile(tmpPath, buffer);
-
+    await fs.writeFile(tmpPath, buf);
     try {
-      // 1) WordExtractor
+      // WordExtractor
       try {
         const doc = await new WordExtractor().extract(tmpPath);
         const txt = normalize(doc.getBody()).trim();
         if (txt) return txt;
-      } catch {
-        // continúa a fallback
-      }
-
-      // 2) officeParser fallback
+      } catch {}
+      // fallback officeParser
       return await new Promise((res, rej) =>
-        officeParser.parseOffice(tmpPath, (err, text) =>
-          err ? rej(err) : res(normalize(text).trim())
+        officeParser.parseOffice(tmpPath, (err, t) =>
+          err ? rej(err) : res(normalize(t).trim())
         )
       );
     } finally {
@@ -151,54 +139,45 @@ export async function readFileContent(file) {
     }
   }
 
-  // XLSX → lee con xlsx en memoria
-  const workbook = xlsx.read(buffer, { type: "buffer" });
-  const sheets = {};
-  workbook.SheetNames.forEach((name) => {
-    // sheet_to_json con header=1 para obtener arrays de celdas
-    const rows = xlsx.utils.sheet_to_json(workbook.Sheets[name], {
-      header: 1,
-      defval: "",
-      raw: false,
+  // --- XLSX (streaming)
+  if (/\.xlsx?$/i.test(file.name)) {
+    const resp = await axios.get(url, {
+      headers: await authHeaders(),
+      responseType: "stream",
     });
-    // Convertimos cada fila a objeto { A:val, B:val, ... }
-    sheets[name] = rows.map((cells) =>
-      cells.reduce((obj, v, i) => {
-        obj[xlsx.utils.encode_col(i)] = v;
-        return obj;
-      }, {})
-    );
-  });
-  return sheets;
+    // WorkbookReader es un async iterable
+    return new ExcelJS.stream.xlsx.WorkbookReader(resp.data);
+  }
+
+  throw new Error("Formato no soportado");
 }
 
-/* =========  TEXTO PLANO UNIFICADO  ===================================== */
 /**
- * getFileText: convierte cualquier archivo soportado a un string plano.
- * - Word → texto literal
- * - Excel → bloque TSV multi-hoja
+ * Convierte cualquier contenido soportado a string:
+ * - Word → string
+ * - Excel → bloque TSV
  */
 export async function getFileText(file) {
   const content = await readFileContent(file);
 
-  // Word → ya es string
   if (typeof content === "string") {
     return content;
   }
 
-  // Excel → TSV multi-hoja
+  // streaming WorkbookReader → TSV
   const lines = [];
-  for (const [sheet, rows] of Object.entries(content)) {
-    lines.push(`>>> Hoja: ${sheet}`);
-    if (!rows.length) {
-      lines.push("");
-      continue;
+  for await (const worksheet of content) {
+    lines.push(`>>> Hoja: ${worksheet.name}`);
+    let headerEmitted = false;
+    for await (const row of worksheet) {
+      if (!headerEmitted) {
+        const cols = row.values.slice(1).map(() => "");
+        lines.push(cols.map((_, i) => `Col${i+1}`).join("\t"));
+        headerEmitted = true;
+      }
+      const cells = row.values.slice(1).map((c) => String(c ?? ""));
+      lines.push(cells.join("\t"));
     }
-    const cols = Object.keys(rows[0]);
-    lines.push(cols.join("\t"));
-    rows.forEach((r) => {
-      lines.push(cols.map((c) => r[c] ?? "").join("\t"));
-    });
     lines.push("");
   }
   return lines.join("\n").trim();
