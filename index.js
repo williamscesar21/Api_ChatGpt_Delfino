@@ -1,38 +1,36 @@
-// server.js  (ESM)
+/* ------------------------------------------------------------------
+   server.js  (ESM) – API pública, sin Basic-Auth ni Firebase guard
+------------------------------------------------------------------ */
 import "dotenv/config";
 import express  from "express";
 import cors     from "cors";
 import helmet   from "helmet";
-import morgan   from "morgan";               // ← registro en consola
+import morgan   from "morgan";
 
-import { basicAuth }       from "./middleware/basicAuth.js";
 import chatRoutes          from "./routes/chatRoutes.js";
 import fileRoutes          from "./routes/fileRoutes.js";
 import { loadVectorStore } from "./services/vectorStoreService.js";
 
-/* ───────── preload vector-store ───────── */
+/* --------- precarga vector-store --------- */
 await loadVectorStore();                     // lee ./vectorstore/index.json
 
-/* ───────── app + middlewares ───────── */
+/* --------- app + middlewares --------- */
 const app = express();
 app.use(helmet());
-app.use(morgan("dev"));                      // GET /api/files 200 42 ms
+app.use(morgan("dev"));                      // ejemplo: GET /api/files 200 42 ms
 app.use(express.json({ limit: "4mb" }));
 
-/* ───────── CORS (refleja cualquier origen) ───────── */
+/* --------- CORS (permite cualquier origen) --------- */
 const corsOptions = {
-  origin: (_origin, cb) => cb(null, true),   // permite todos los orígenes
-  credentials: true,                         // deja pasar Authorization
+  origin: (_origin, cb) => cb(null, true),
+  credentials: true,
   methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD",
   allowedHeaders: "Origin,Content-Type,Authorization,Accept",
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));         // pre-flight
 
-/* ───────── Basic-Auth después de CORS ───────── */
-app.use(basicAuth);
-
-/* ───────── rutas protegidas ───────── */
+/* --------- rutas públicas --------- */
 app.use("/api", chatRoutes);   // /api/chat…
 app.use("/api", fileRoutes);   // /api/files, /api/files/reindex…
 
@@ -56,7 +54,7 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-/* ───────── listen ───────── */
+/* --------- listen --------- */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
   console.log(`🚀 API corriendo en http://localhost:${PORT}`)
