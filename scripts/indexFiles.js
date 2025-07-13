@@ -7,7 +7,7 @@ import { createEmbedding } from "../services/embeddingsService.js";
 
 const VECTORSTORE_PATH =
   process.env.VECTORSTORE_PATH || "./vectorstore/index.json";
-const MAX_TOKENS_EMB = 8192;
+const MAX_TOKENS_EMB = 8192;                   // límite de tokens
 const BATCH_ROWS = +process.env.BATCH_ROWS_PER_CHUNK || 200;
 
 const enc = encoding_for_model(
@@ -15,6 +15,7 @@ const enc = encoding_for_model(
 );
 const countTokens = (str) => enc.encode(str).length;
 
+// Divide un texto en trozos que quepan en el límite de tokens
 function splitToFit(text) {
   const parts = [];
   const stack = [text];
@@ -30,84 +31,111 @@ function splitToFit(text) {
   return parts;
 }
 
-// chunk para texto genérico
-function chunkText(str) {
-  return splitToFit(str);
-}
-
-// chunk para Excel (igual que antes)
-function chunkExcel(book) {
-  const out = [];
-  const fits = (t) => countTokens(t) <= MAX_TOKENS_EMB;
-
-  for (const [sheet, rows] of Object.entries(book)) {
-    let chunk = `Hoja: ${sheet}\n`;
-    let added = 0;
-
-    for (let r = rows.length - 1; r >= 0; r--) {
-      const row = rows[r];
-      for (const [col, raw] of Object.entries(row)) {
-        const value = String(raw).trim();
-        if (!value || value.length > 200) continue;
-        const line = `Fila ${r + 1} Col ${col}: ${value}`;
-        if (!fits(chunk + line + "\n")) {
-          out.push(chunk);
-          chunk = `Hoja: ${sheet} (cont.)\n`;
-        }
-        chunk += line + "\n";
-        if (++added % BATCH_ROWS === 0 && chunk.trim()) {
-          out.push(chunk);
-          chunk = `Hoja: ${sheet} (cont.)\n`;
-        }
-      }
-    }
-    if (chunk.trim()) out.push(chunk);
-  }
-
-  return out.flatMap(splitToFit);
-}
-
-;(async () => {
-  // Asegura carpeta
-  await fsPromises.mkdir(path.dirname(VECTORSTORE_PATH), {
-    recursive: true,
-  });
-
-  // Crea stream de escritura
+(async () => {
+  // 1) Prepara carpeta y stream de escritura
+  await fsPromises.mkdir(path.dirname(VECTORSTORE_PATH), { recursive: true });
   const writer = fs.createWriteStream(VECTORSTORE_PATH, { encoding: "utf8" });
   writer.write("[\n");
+  let firstRecord = true;
 
-  let first = true;
-  const files = await listAllFiles();
-  for (const file of files) {
+  // 2) Itera archivos
+  for (const file of await listAllFiles()) {
     console.log(`🗄  Procesando: ${file.path}`);
     try {
       const raw = await readFileContent(file);
-      const chunks = typeof raw === "string" ? chunkText(raw) : chunkExcel(raw);
 
-      for (const [i, text] of chunks.entries()) {
-        const embedding = await createEmbedding(text);
-        const record = {
-          fileId: file.id,
-          path: file.path,
-          chunk: i,
-          text,
-          embedding,
-        };
-        const json = JSON.stringify(record, null, 2);
-        // escribe coma si no es el primer elemento
-        writer.write(first ? json : ",\n" + json);
-        first = false;
-        console.log(`   ✅  ${file.name} [${i}]`);
+      // 3A) Texto plano
+      if (typeof raw === "string") {
+        const chunks = splitToFit(raw);
+        for (const [i, text] of chunks.entries()) {
+          const [embedding] = await createEmbedding([text]);
+          const record = { fileId: file.id, path: file.path, chunk: i, text, embedding };
+          const json = JSON.stringify(record, null, 2);
+          writer.write(firstRecord ? json : ",\n" + json);
+          firstRecord = false;
+          console.log(`   ✅  ${file.name} [${i}]`);
+        }
+      }
+      // 3B) Excel: recorre celda a celda y hace chunk dinámico
+      else {
+        const book = raw;
+        for (const [sheetName, rows] of Object.entries(book)) {
+          let chunkText = `Hoja: ${sheetName}\n`;
+          let addedRows = 0;
+          let chunkIndex = 0;
+
+          // filas de abajo a arriba
+          for (let r = rows.length - 1; r >= 0; r--) {
+            const row = rows[r];
+            for (const [col, rawCell] of Object.entries(row)) {
+              const value = String(rawCell).trim();
+              if (!value || value.length > 200) continue;
+              const line = `Fila ${r + 1} Col ${col}: ${value}\n`;
+
+              // si supera tokens, emite el chunk actual
+              if (countTokens(chunkText + line) > MAX_TOKENS_EMB) {
+                const [embedding] = await createEmbedding([chunkText]);
+                const record = {
+                  fileId: file.id,
+                  path: file.path,
+                  chunk: chunkIndex++,
+                  text: chunkText,
+                  embedding,
+                };
+                const json = JSON.stringify(record, null, 2);
+                writer.write(firstRecord ? json : ",\n" + json);
+                firstRecord = false;
+                console.log(`   ✅  ${file.name} [${chunkIndex - 1}]`);
+                chunkText = `Hoja: ${sheetName} (cont.)\n`;
+                addedRows = 0;
+              }
+
+              chunkText += line;
+              addedRows++;
+
+              // cada BATCH_ROWS también emite
+              if (addedRows >= BATCH_ROWS) {
+                const [embedding] = await createEmbedding([chunkText]);
+                const record = {
+                  fileId: file.id,
+                  path: file.path,
+                  chunk: chunkIndex++,
+                  text: chunkText,
+                  embedding,
+                };
+                const json = JSON.stringify(record, null, 2);
+                writer.write(firstRecord ? json : ",\n" + json);
+                firstRecord = false;
+                console.log(`   ✅  ${file.name} [${chunkIndex - 1}]`);
+                chunkText = `Hoja: ${sheetName} (cont.)\n`;
+                addedRows = 0;
+              }
+            }
+          }
+
+          // emite resto final de la hoja
+          if (chunkText.trim()) {
+            const [embedding] = await createEmbedding([chunkText]);
+            const record = {
+              fileId: file.id,
+              path: file.path,
+              chunk: chunkIndex++,
+              text: chunkText,
+              embedding,
+            };
+            const json = JSON.stringify(record, null, 2);
+            writer.write(firstRecord ? json : ",\n" + json);
+            firstRecord = false;
+            console.log(`   ✅  ${file.name} [${chunkIndex - 1}]`);
+          }
+        }
       }
     } catch (err) {
       console.error(`   ❌  ${file.name}: ${err.message}`);
     }
   }
 
+  // 4) Cierra el JSON y el stream
   writer.write("\n]\n");
-  // cierra el stream
-  writer.end(() => {
-    console.log(`🗂  Vectorstore guardado en ${VECTORSTORE_PATH}`);
-  });
+  writer.end(() => console.log(`🗂  Vectorstore guardado en ${VECTORSTORE_PATH}`));
 })();
