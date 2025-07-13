@@ -1,3 +1,4 @@
+
 import fs from "fs";
 import fsPromises from "fs/promises";
 import path from "path";
@@ -10,7 +11,7 @@ const gc = global.gc ? () => global.gc() : () => {};
 
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || "./vectorstore/index.json";
 const MAX_TOKENS_EMB = 8192;
-const BATCH_ROWS = +process.env.BATCH_ROWS_PER_CHUNK || 50; // Reduced batch size
+const BATCH_ROWS = +process.env.BATCH_ROWS_PER_CHUNK || 20; // Further reduced
 
 const enc = encoding_for_model(
   process.env.EMBEDDING_MODEL || "text-embedding-3-large"
@@ -71,6 +72,7 @@ function chunkExcel(book) {
           out.push(chunk);
           chunk = `Hoja: ${sheet} (cont.)\n`;
           added = 0;
+          gc();
         }
         chunk += line;
         added++;
@@ -92,7 +94,8 @@ function chunkExcel(book) {
 (async () => {
   // Enable manual garbage collection
   if (!global.gc) {
-    console.warn("⚠️  Run node with --expose-gc for manual garbage collection");
+    console.error("⚠️  Run node with --expose-gc to enable manual garbage collection");
+    process.exit(1); // Exit to force correct configuration
   }
 
   // Prepara carpeta de salida
@@ -136,6 +139,7 @@ function chunkExcel(book) {
       continue; // Skip to next file
     }
     logMemory();
+    gc();
   }
 
   // Cierra array JSON

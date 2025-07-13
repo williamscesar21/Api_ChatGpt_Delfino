@@ -1,3 +1,4 @@
+
 import axios from "axios";
 import qs from "qs";
 import mammoth from "mammoth";
@@ -76,6 +77,7 @@ async function walk(base = "") {
         id: it.id,
         name: it.name,
         path: base ? `${base}/${it.name}` : it.name,
+        size: it.size, // Include file size
       });
     }
   }
@@ -105,7 +107,12 @@ export async function readFileContent(file) {
     throw new Error(`Extensión no soportada: ${file.name}`);
   }
 
-  console.log(`Downloading ${file.path}`);
+  // Skip files larger than 10MB
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error(`File too large: ${file.path} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+  }
+
+  console.log(`Downloading ${file.path} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
   const { data: buffer } = await axios.get(
     `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/drives/${DRIVE_ID}/items/${file.id}/content`,
     { headers: await authHeaders(), responseType: "arraybuffer" }
@@ -148,11 +155,12 @@ export async function readFileContent(file) {
 
   // XLSX → Stream processing
   if (/\.xlsx$/i.test(file.name)) {
-    const workbook = xlsx.read(buffer, { type: "buffer", cellDates: true });
+    const workbook = xlsx.read(buffer, { type: "buffer", cellDates: true, sparse: true });
     const sheets = {};
     workbook.SheetNames.forEach((name) => {
       const sheet = workbook.Sheets[name];
       const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
+      console.log(`Sheet ${name} has ${rows.length} rows`);
       sheets[name] = rows.map((cells) =>
         cells.reduce((obj, v, i) => {
           obj[xlsx.utils.encode_col(i)] = v;
