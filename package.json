@@ -23,6 +23,7 @@
     "officeparser": "^5.2.0",
     "openai": "^4.39.1",
     "qs": "^6.14.0",
+    "soffice": "^1.1.0",
     "tiktoken": "^1.0.21",
     "uuid": "^11.1.0",
     "word-extractor": "^1.0.4",
