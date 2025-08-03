@@ -6,7 +6,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ───────── Config ───────── */
 export const EMBEDDING_MODEL =
-  process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-large';
+  process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-ada-002';
 
 const MAX_TOKENS_INPUT = 8192;         // límite oficial
 const CHAR_PER_TOKEN   = 4;            // aprox. para corte defensivo
