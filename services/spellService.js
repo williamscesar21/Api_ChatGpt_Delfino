@@ -14,7 +14,7 @@ sin cambiar el idioma ni agregar información:
 
   const { choices } = await openai.chat.completions.create({
     model: 'gpt-3.5-turbo',
-    temperature: 0,
+    temperature: 1,
     messages: [{ role: 'user', content: prompt }]
   });
 
