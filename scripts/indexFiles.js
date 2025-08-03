@@ -1,4 +1,3 @@
-
 import fs from "fs";
 import fsPromises from "fs/promises";
 import path from "path";
@@ -6,19 +5,24 @@ import { encoding_for_model } from "tiktoken";
 import { listAllFiles, readFileContent } from "../services/fileService.js";
 import { createEmbedding } from "../services/embeddingsService.js";
 
-// Force garbage collection if available
+// Force garbage collection if available to manage memory usage during indexing
 const gc = global.gc ? () => global.gc() : () => {};
 
+// Define path for the output vector store file
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || "./vectorstore/index.json";
+// Maximum tokens for embedding to ensure chunks fit model limits
 const MAX_TOKENS_EMB = 8192;
-const BATCH_ROWS = +process.env.BATCH_ROWS_PER_CHUNK || 20; // Further reduced
+// Number of rows to process per chunk (used for Excel, but kept for reference)
+const BATCH_ROWS = +process.env.BATCH_ROWS_PER_CHUNK || 20;
 
+// Initialize token encoder for the specified embedding model
 const enc = encoding_for_model(
   process.env.EMBEDDING_MODEL || "text-embedding-3-large"
 );
+// Function to count tokens in a string using the encoder
 const countTokens = (str) => enc.encode(str).length;
 
-/** Log memory usage */
+/** Log memory usage to monitor heap during processing */
 function logMemory() {
   const mem = process.memoryUsage();
   const toMB = (bytes) => (bytes / 1024 / 1024).toFixed(2);
@@ -30,7 +34,7 @@ function logMemory() {
   );
 }
 
-/** Divide un texto en trozos que quepan en el límite de tokens */
+/** Split text into chunks that fit within the token limit */
 function splitToFit(text) {
   const parts = [];
   const stack = [text];
@@ -43,16 +47,20 @@ function splitToFit(text) {
       stack.push(chunk.slice(0, mid), chunk.slice(mid));
     }
   }
-  gc();
+  gc(); // Trigger garbage collection to free memory
   return parts;
 }
 
-/** Trocea texto plano */
+/** Chunk plain text (used for .docx files) */
 function chunkText(str) {
   return splitToFit(str);
 }
 
-/** Trocea el objeto Excel { sheet: RowObject[] } */
+/** 
+ * Chunk Excel data (commented out as we are only indexing .docx files)
+ * This function is kept for reference but not used in the current implementation
+ */
+/*
 function chunkExcel(book) {
   const out = [];
   const fits = (t) => countTokens(t) <= MAX_TOKENS_EMB;
@@ -90,29 +98,42 @@ function chunkExcel(book) {
 
   return out.flatMap(splitToFit);
 }
+*/
 
 (async () => {
-  // Enable manual garbage collection
+  // Check if garbage collection is enabled
   if (!global.gc) {
     console.error("⚠️  Run node with --expose-gc to enable manual garbage collection");
-    process.exit(1); // Exit to force correct configuration
+    process.exit(1); // Exit to enforce correct configuration
   }
 
-  // Prepara carpeta de salida
+  // Create output directory for vector store
   await fsPromises.mkdir(path.dirname(VECTORSTORE_PATH), { recursive: true });
 
-  // Stream de escritura
+  // Initialize JSON array in output file
   const writer = fs.createWriteStream(VECTORSTORE_PATH, { encoding: "utf8" });
   writer.write("[\n");
   let first = true;
 
+  // Get list of all files
   const files = await listAllFiles();
   for (const file of files) {
+    // Filter to process only .docx files
+    if (!file.path.endsWith(".docx")) {
+      console.log(`⏭  Saltando: ${file.path} (no es .docx)`);
+      continue;
+    }
+
     console.log(`🗄  Procesando: ${file.path}`);
     logMemory();
     try {
       const raw = await readFileContent(file);
-      const chunks = typeof raw === "string" ? chunkText(raw) : chunkExcel(raw);
+      // Process only as plain text (for .docx files)
+      if (typeof raw !== "string") {
+        console.error(`   ❌  ${file.name}: Se esperaba texto plano para .docx`);
+        continue;
+      }
+      const chunks = chunkText(raw);
 
       for (let i = 0; i < chunks.length; i++) {
         const text = chunks[i];
@@ -142,7 +163,7 @@ function chunkExcel(book) {
     gc();
   }
 
-  // Cierra array JSON
+  // Close JSON array
   writer.write("\n]\n");
   await new Promise((resolve) => writer.end(resolve));
   console.log(`🗂  Vectorstore guardado en ${VECTORSTORE_PATH}`);
