@@ -2,6 +2,7 @@ import { Router } from 'express';
 import fs from 'fs/promises';
 import { createEmbedding, similaritySearch } from '../services/embeddingsService.js';
 import { askOpenAI, askOpenAIStream } from '../services/openaiService.js';
+import { newChat } from '../services/conversationService.js'; // Importar newChat
 
 const router = Router();
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || './vectorstore/index.json';
@@ -9,6 +10,28 @@ const TOP_K = Number(process.env.TOP_K || 10);
 const MIN_SIM = Number(process.env.MIN_SIM || 0.3);
 const KEEPALIVE_MS = 15_000;
 
+/* ───────────── POST /api/chat/start ─────────────
+   Inicia una nueva conversación y devuelve un chatId
+*/
+router.post('/chat/start', (req, res) => {
+  try {
+    const chatId = newChat();
+    console.log('🆕 Nueva conversación iniciada:', chatId);
+    res.json({ chatId });
+  } catch (err) {
+    console.error('❌ Error en /api/chat/start:', err.message);
+    res.status(500).json({ error: 'Error al iniciar la conversación' });
+  }
+});
+
+/* ───────────── POST /api/chat ─────────────
+   body: {
+     message: string,      // Pregunta del usuario
+     stream?: boolean,     // Opcional: usar streaming (default: false)
+     fileName?: string     // Opcional: nombre del archivo para filtrar
+   }
+   Responde con la información del contexto en Markdown, citando textualmente si se especifica fileName
+*/
 router.post('/chat', async (req, res) => {
   try {
     const { message, stream = false, fileName } = req.body;
