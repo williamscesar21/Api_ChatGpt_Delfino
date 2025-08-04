@@ -1,145 +1,123 @@
-// src/routes/chatRoutes.js
-// -----------------------------------------------
-import { Router } from "express";
+import { Router } from 'express';
+import fs from 'fs/promises';
+import { createEmbedding, similaritySearch } from '../services/embeddingsService.js';
+import { askOpenAI, askOpenAIStream } from '../services/openaiService.js';
 
-import { createEmbedding, similaritySearch } from "../services/embeddingsService.js";
-import { getRows }            from "../services/vectorStoreService.js";
-import { buildMessages }      from "../utils/buildPrompt.js";
-import {
-  askOpenAI,            // respuesta completa
-  askOpenAIStream,      // respuesta mediante streaming
-} from "../services/openaiService.js";
-import { buildCacheKey, cache } from "../services/cacheService.js";
-import {
-  newChat,
-  appendMessage,
-  appendAssistant,
-  getTail,
-} from "../services/conversationService.js";
+const router = Router();
+const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || './vectorstore/index.json';
+const TOP_K = Number(process.env.TOP_K || 10);
+const MIN_SIM = Number(process.env.MIN_SIM || 0.3);
+const KEEPALIVE_MS = 15_000;
 
-/*  Si vuelves a habilitar autocorrección, descomenta
-// import { fixSpelling } from "../services/spellService.js";
-*/
-
-const router       = Router();
-const TOP_K        = Number(process.env.TOP_K    || 6);   // chunks por vector-search
-const MAX_TAIL     = Number(process.env.MAX_TAIL || 8);   // mensajes previos
-const KEEPALIVE_MS = 15_000;                              // ping SSE
-
-/* ──────────────────────────────────────────────
-   POST /api/chat/start  → { chatId }
-───────────────────────────────────────────────*/
-router.post("/chat/start", (_req, res) => {
-  res.json({ chatId: newChat() });
-});
-
-/* ──────────────────────────────────────────────
-   POST /api/chat
-   body: {
-     chatId,
-     message,
-     selectedIds? : string[],
-     stream?      : boolean,
-     systemPrompt?: string,
-     maxCharsPerFile?: number,
-     maxHistory?: number
-   }
-───────────────────────────────────────────────*/
-router.post("/chat", async (req, res) => {
+router.post('/chat', async (req, res) => {
   try {
-    const {
-      chatId,
-      message,
-      selectedIds = [],
-      stream = false,
-
-      // 🆕  parámetros enviados desde el front
-      systemPrompt,
-      maxCharsPerFile,
-      maxHistory,
-    } = req.body;
+    const { message, stream = false, fileName } = req.body;
 
     if (!message?.trim()) {
-      return res.status(400).json({ error: "Empty message" });
+      return res.status(400).json({ error: 'Falta la pregunta' });
+    }
+    console.log('📝 Pregunta recibida:', message);
+    if (fileName) console.log('📂 Archivo solicitado:', fileName);
+
+    let vectorstore;
+    try {
+      vectorstore = JSON.parse(await fs.readFile(VECTORSTORE_PATH, 'utf8'));
+      console.log('📊 Vector store cargado:', vectorstore.length, 'entradas');
+    } catch (err) {
+      console.error('❌ Error al cargar vectorstore:', err.message);
+      return res.status(500).json({ error: 'No se pudo cargar el vector store' });
     }
 
-    /* 1⃣ (opcional) autocorrección */
-    // const fixed = await fixSpelling(message);
-    const fixed = message;
-
-    /* 2⃣ Cache (solo si NO es streaming) */
-    const cacheKey = buildCacheKey(fixed, selectedIds);
-    if (!stream && cache.has(cacheKey)) {
-      const cached = cache.get(cacheKey);
-      appendAssistant(chatId, cached);
-      return res.json({ answer: cached, cached: true });
+    if (!vectorstore.length) {
+      console.warn('⚠️ Vector store vacío');
+      const answer = 'No tengo información suficiente en los documentos para responder esa pregunta.';
+      return res.json({ answer, hits: [] });
     }
 
-    /* 3⃣ Embedding + similarity search */
-    const qEmb = await createEmbedding(fixed);
-    const pool = getRows().filter(
-      (r) => !selectedIds.length || selectedIds.includes(r.fileId),
-    );
-    const hits = similaritySearch(qEmb, pool, TOP_K);
+    // Filtrar vector store si se especifica un archivo
+    let filteredVectorstore = vectorstore;
+    if (fileName) {
+      filteredVectorstore = vectorstore.filter(v => v.path === fileName);
+      console.log('📊 Vector store filtrado:', filteredVectorstore.length, 'entradas para', fileName);
+      if (!filteredVectorstore.length) {
+        const answer = `No se encontraron documentos con el nombre "${fileName}".`;
+        return res.json({ answer, hits: [] });
+      }
+    }
 
-    /* 4⃣ Reúne contexto por archivo */
-    const ctxMap = {};
-    hits.forEach((h) => {
-      ctxMap[h.path] = (ctxMap[h.path] || "") + "\n" + h.text;
-    });
+    const queryEmb = await createEmbedding(message);
+    console.log('📏 Query embedding length:', queryEmb.length);
+    const hits = similaritySearch(queryEmb, filteredVectorstore, TOP_K, MIN_SIM);
+    console.log('🔍 Resultados de búsqueda:', hits.length, hits.map(h => ({
+      path: h.path,
+      chunk: h.chunk,
+      similarity: Number(h.similarity.toFixed(3))
+    })));
 
-    /* 5⃣ Historial corto */
-    const history = getTail(chatId, MAX_TAIL);
+    const context = hits.length
+      ? hits.map(h => `Archivo: ${h.path} · Chunk ${h.chunk}\n${h.text}`).join('\n---\n')
+      : '(sin fragmentos relevantes)';
+    console.log('📝 Longitud del contexto:', context.length, 'caracteres');
 
-    /* 6⃣ Prompt listo (usa los valores recibidos o defaults) */
-    const messages = buildMessages(fixed, ctxMap, history, {
-      systemPrompt,
-      maxCharsPerFile,
-      maxHistory,
-    });
+    // Prompt estricto para citar textualmente cuando se especifica un archivo
+    const systemPrompt = fileName
+      ? `
+        Eres **DelfinoBot**, el asistente virtual oficial de *Delfino Tours II*.
+        Responde ÚNICAMENTE citando textualmente el contenido del contexto proporcionado, sin resumir, parafrasear ni interpretar, solo traducido al español o en su defecto al idioma en el que te indiquen.
+        Si el contexto no contiene información relevante, di: "No se encontró información relevante en el documento ${fileName}."
+        Si el cliente pregunta quién eres, responde:
+        «Soy DelfinoBot, el asistente virtual oficial de Delfino Tours II».`.trim()
+      : `
+        Eres **DelfinoBot**, el asistente virtual oficial de *Delfino Tours II*.
+        Responde ÚNICAMENTE con la información contenida en el contexto proporcionado.
+        Si el contexto no contiene información relevante, di: "No tengo información suficiente en los documentos para responder esa pregunta."
+        Si el cliente pregunta quién eres, responde:
+        «Soy DelfinoBot, el asistente virtual oficial de Delfino Tours II».`.trim();
 
-    /* ───────────── STREAM (SSE) ───────────── */
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'system', content: `Contexto:\n${context}` },
+      { role: 'user', content: message }
+    ];
+
     if (stream) {
       res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
       });
       if (res.flushHeaders) res.flushHeaders();
 
-      const ping = setInterval(() => res.write(":\n\n"), KEEPALIVE_MS);
+      const ping = setInterval(() => res.write(':\n\n'), KEEPALIVE_MS);
+      let answer = '';
 
-      let fullAnswer = "";
       try {
         for await (const chunk of askOpenAIStream(messages)) {
           const delta = chunk.choices?.[0]?.delta?.content;
-          if (!delta) continue; // ignora pings de OpenAI
-          fullAnswer += delta;
+          if (!delta) continue;
+          answer += delta;
           res.write(`data:${delta}\n\n`);
         }
       } finally {
         clearInterval(ping);
+        res.end();
       }
 
-      /* guarda conversación y cachea */
-      appendMessage(chatId, { role: "user", content: fixed });
-      appendAssistant(chatId, fullAnswer);
-      cache.set(cacheKey, fullAnswer);
-
-      return res.end();
+      return;
     }
 
-    /* ───────── RESPUESTA CLÁSICA ───────── */
     const answer = await askOpenAI(messages);
-
-    appendMessage(chatId, { role: "user", content: fixed });
-    appendAssistant(chatId, answer);
-    cache.set(cacheKey, answer);
-
-    res.json({ answer });
+    res.json({
+      answer,
+      hits: hits.map(h => ({
+        file: h.path,
+        chunk: h.chunk,
+        similarity: Number(h.similarity.toFixed(3))
+      }))
+    });
   } catch (err) {
-    console.error("POST /chat error:", err);
-    res.status(500).json({ error: err?.message || "Internal error" });
+    console.error('❌ Error en /api/chat:', err.message);
+    res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
 
