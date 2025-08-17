@@ -1,4 +1,3 @@
-
 import axios from "axios";
 import qs from "qs";
 import mammoth from "mammoth";
@@ -9,7 +8,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-// Force garbage collection if available
+// GC manual si está disponible
 const gc = global.gc ? () => global.gc() : () => {};
 
 /* =========  ENV & AUTH  ============================================== */
@@ -21,7 +20,11 @@ const {
   DRIVE_ID,
   SHAREPOINT_ROOT_PATH = "Prueba API",
   GRAPH_SCOPE = "https://graph.microsoft.com/.default",
+  XLSX_ROWS_PER_BLOCK: XLSX_ROWS_PER_BLOCK_ENV
 } = process.env;
+
+// ✅ Por defecto 100 filas por bloque si no se configura en .env
+const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 100;
 
 /** Cache simple para OAuth token */
 let cache = { token: null, exp: 0 };
@@ -77,14 +80,14 @@ async function walk(base = "") {
         id: it.id,
         name: it.name,
         path: base ? `${base}/${it.name}` : it.name,
-        size: it.size, // Include file size
+        size: it.size,
       });
     }
   }
   return files;
 }
 
-/** Devuelve lista de todos los archivos .doc/.docx/.xlsx bajo la carpeta raíz */
+/** Devuelve lista de todos los archivos soportados bajo la carpeta raíz */
 export async function listAllFiles() {
   const files = await walk(SHAREPOINT_ROOT_PATH.trim());
   console.log(`Found ${files.length} files.`);
@@ -107,7 +110,7 @@ export async function readFileContent(file) {
     throw new Error(`Extensión no soportada: ${file.name}`);
   }
 
-  // Skip files larger than 10MB
+  // Evitar archivos > 10MB
   if (file.size > 10 * 1024 * 1024) {
     throw new Error(`File too large: ${file.path} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
   }
@@ -132,16 +135,14 @@ export async function readFileContent(file) {
     await fs.writeFile(tmpPath, buffer);
 
     try {
-      // 1) WordExtractor
       try {
         const doc = await new WordExtractor().extract(tmpPath);
         const txt = normalize(doc.getBody()).trim();
         if (txt) return txt;
       } catch {
-        // continúa a fallback
+        // fallback
       }
 
-      // 2) officeParser fallback
       return await new Promise((res, rej) =>
         officeParser.parseOffice(tmpPath, (err, text) =>
           err ? rej(err) : res(normalize(text).trim())
@@ -153,7 +154,7 @@ export async function readFileContent(file) {
     }
   }
 
-  // XLSX → Stream processing
+  // XLSX → procesamiento en memoria
   if (/\.xlsx$/i.test(file.name)) {
     const workbook = xlsx.read(buffer, { type: "buffer", cellDates: true, sparse: true });
     const sheets = {};
@@ -173,31 +174,64 @@ export async function readFileContent(file) {
   }
 }
 
-/* =========  TEXTO PLANO UNIFICADO  ===================================== */
-export async function getFileText(file) {
-  const content = await readFileContent(file);
+/* =========  TEXTO EN BLOQUES (para Excel enorme)  ===================== */
+export async function getFileText(file, opts = {}) {
+  const rowsPerBlock = Number(opts.rowsPerBlock) > 0 ? Number(opts.rowsPerBlock) : XLSX_ROWS_PER_BLOCK;
 
-  // Word → ya es string
+  let content;
+  try {
+    content = await readFileContent(file);
+  } catch (err) {
+    console.error(`   ⚠️ Error leyendo ${file.name}: ${err.message}`);
+    return [""];
+  }
+
+  // Word → ya es string, lo devolvemos envuelto en array
   if (typeof content === "string") {
-    return content;
+    return [content];
   }
 
-  // Excel → TSV multi-hoja
-  const lines = [];
-  for (const [sheet, rows] of Object.entries(content)) {
-    lines.push(`>>> Hoja: ${sheet}`);
-    if (!rows.length) {
-      lines.push("");
-      continue;
+  // Excel → TSV multi-hoja en bloques
+  try {
+    const blocks = [];
+    for (const [sheet, rows] of Object.entries(content)) {
+      // Determinar columnas
+      const colSet = new Set();
+      for (let k = 0; k < Math.min(rows.length, 1000); k++) {
+        Object.keys(rows[k]).forEach((c) => colSet.add(c));
+      }
+      const cols = Array.from(colSet).sort((a, b) => {
+        const toIndex = (col) =>
+          col.split("").reduce((acc, ch) => acc * 26 + (ch.charCodeAt(0) - 64), 0);
+        return toIndex(a) - toIndex(b);
+      });
+
+      let blockIndex = 0;
+      let current = [`>>> Hoja: ${sheet}`, cols.join("\t")];
+      let counter = 0;
+
+      for (const r of rows) {
+        current.push(cols.map((c) => (r[c] ?? "")).join("\t"));
+        counter++;
+
+        if (counter >= rowsPerBlock) {
+          blocks.push(current.join("\n"));
+          // Para el siguiente bloque ya NO repetimos encabezado
+          current = [];
+          counter = 0;
+          blockIndex++;
+          if (gc) gc();
+        }
+      }
+
+      if (current.length) {
+        blocks.push(current.join("\n"));
+      }
     }
-    const cols = Object.keys(rows[0]);
-    lines.push(cols.join("\t"));
-    rows.forEach((r) => {
-      lines.push(cols.map((c) => r[c] ?? "").join("\t"));
-    });
-    lines.push("");
+    if (gc) gc();
+    return blocks.length ? blocks : [""];
+  } catch (err) {
+    console.error(`   ⚠️ Error convirtiendo ${file.name} a texto: ${err.message}`);
+    return [""];
   }
-  const result = lines.join("\n").trim();
-  gc();
-  return result;
 }
