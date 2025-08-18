@@ -1,40 +1,34 @@
-// chatRoutes.js - Versión actualizada
-// Cambios principales:
-// - Forzado modelo a "gpt-5-chat-latest" en llamadas a askOpenAI y askOpenAIStream.
-// - TOP_K fijo a 10 (configurable via env o constante).
-// - Cortado context a máximo ~48k chars (aprox 12k tokens); si excede, truncar y log warning.
-// - Manejo de errores: check !res.headersSent antes de responder en catch para evitar ERR_HTTP_HEADERS_SENT.
-// - Logs mejorados: tamaño de contexto, hits encontrados.
-// - Constantes configurables: TOP_K, MIN_SIM, MAX_CONTEXT_CHARS, KEEPALIVE_MS.
-// - Importado tiktoken para conteo preciso de tokens en context (si excede, truncar basado en chars como aproximación segura).
+// chatRoutes.js - Versión actualizada adicionalmente
+// Cambios nuevos:
+// - Cambiado model a 'gpt-5' basado en la release de Agosto 2025 (eliminado '-chat-latest' ya que no existe; usar 'gpt-5' para chat).
+// - Añadido deduplicación de hits por path-chunk para evitar repeticiones en resultados y reducir contexto innecesariamente grande.
+// - Log añadido para hits únicos después de dedup.
+// - Si contexto aún excede después de truncar, warning ya existe.
 
 import { Router } from 'express';
 import fs from 'fs/promises';
 import { createEmbedding, similaritySearch } from '../services/embeddingsService.js';
 import { askOpenAI, askOpenAIStream } from '../services/openaiService.js';
-import { newChat } from '../services/conversationService.js'; // Importar newChat
-import { encoding_for_model, get_encoding } from "tiktoken";
+import { newChat } from '../services/conversationService.js';
+import { get_encoding } from "tiktoken";
 
 const router = Router();
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || './vectorstore/index.json';
 
-// Constantes configurables
-const TOP_K = Number(process.env.TOP_K || 10); // Limitado a 10 más relevantes
+const TOP_K = Number(process.env.TOP_K || 10);
 const MIN_SIM = Number(process.env.MIN_SIM || 0.3);
 const KEEPALIVE_MS = 15_000;
-const MAX_CONTEXT_CHARS = 48000; // ~12k tokens (aprox 4 chars/token)
+const MAX_CONTEXT_CHARS = 48000;
 
-// Tiktoken para conteo aproximado (usamos chars para truncar por simplicidad y eficiencia)
+// Tiktoken fallback
 let enc;
 try {
-  enc = get_encoding("cl100k_base"); // Fallback genérico
+  enc = get_encoding("cl100k_base");
 } catch {
   console.error("No se pudo inicializar el encoder de tokens para chat.");
 }
 
-/* ───────────── POST /api/chat/start ─────────────
-   Inicia una nueva conversación y devuelve un chatId
-*/
+/* ───────────── POST /api/chat/start ───────────── */
 router.post('/chat/start', (req, res) => {
   try {
     const chatId = newChat();
@@ -46,14 +40,7 @@ router.post('/chat/start', (req, res) => {
   }
 });
 
-/* ───────────── POST /api/chat ─────────────
-   body: {
-     message: string,      // Pregunta del usuario
-     stream?: boolean,     // Opcional: usar streaming (default: false)
-     fileName?: string     // Opcional: nombre del archivo para filtrar
-   }
-   Responde con la información del contexto en Markdown, citando textualmente si se especifica fileName
-*/
+/* ───────────── POST /api/chat ───────────── */
 router.post('/chat', async (req, res) => {
   try {
     const { message, stream = false, fileName } = req.body;
@@ -79,7 +66,6 @@ router.post('/chat', async (req, res) => {
       return res.json({ answer, hits: [] });
     }
 
-    // Filtrar vector store si se especifica un archivo
     let filteredVectorstore = vectorstore;
     if (fileName) {
       filteredVectorstore = vectorstore.filter(v => v.path === fileName);
@@ -92,8 +78,18 @@ router.post('/chat', async (req, res) => {
 
     const queryEmb = await createEmbedding(message);
     console.log('📏 Query embedding length:', queryEmb.length);
-    const hits = similaritySearch(queryEmb, filteredVectorstore, TOP_K, MIN_SIM);
-    console.log('🔍 Resultados de búsqueda:', hits.length, hits.map(h => ({
+    let hits = similaritySearch(queryEmb, filteredVectorstore, TOP_K, MIN_SIM);
+
+    // Deduplicar hits por path-chunk (tomar el de mayor similarity si dups)
+    const hitMap = new Map();
+    for (const h of hits) {
+      const key = `${h.path}-${h.chunk}`;
+      if (!hitMap.has(key) || h.similarity > hitMap.get(key).similarity) {
+        hitMap.set(key, h);
+      }
+    }
+    hits = Array.from(hitMap.values());
+    console.log('🔍 Resultados únicos después de dedup:', hits.length, hits.map(h => ({
       path: h.path,
       chunk: h.chunk,
       similarity: Number(h.similarity.toFixed(3))
@@ -103,14 +99,12 @@ router.post('/chat', async (req, res) => {
       ? hits.map(h => `Archivo: ${h.path} · Chunk ${h.chunk}\n${h.text}`).join('\n---\n')
       : '(sin fragmentos relevantes)';
     
-    // Truncar context si excede MAX_CONTEXT_CHARS
     if (context.length > MAX_CONTEXT_CHARS) {
       console.warn(`⚠️ Contexto truncado: de ${context.length} a ${MAX_CONTEXT_CHARS} chars.`);
       context = context.slice(0, MAX_CONTEXT_CHARS) + '... [truncado]';
     }
     console.log('📝 Longitud del contexto:', context.length, 'caracteres');
 
-    // Prompt estricto para citar textualmente cuando se especifica un archivo
     const systemPrompt = fileName
       ? `
         Eres **DelfinoBot**, el asistente virtual oficial de *Delfino Tours II*.
@@ -133,7 +127,7 @@ router.post('/chat', async (req, res) => {
       { role: 'user', content: message }
     ];
 
-    const model = 'gpt-5-chat-latest'; // Forzado a GPT-5 chat
+    const model = 'gpt-5'; // Cambiado a 'gpt-5' basado en release 2025; elimina '-chat-latest' para evitar 403.
 
     if (stream) {
       res.writeHead(200, {
@@ -147,7 +141,7 @@ router.post('/chat', async (req, res) => {
       let answer = '';
 
       try {
-        for await (const chunk of askOpenAIStream(messages, { model })) { // Pasar modelo
+        for await (const chunk of askOpenAIStream(messages, { model })) {
           const delta = chunk.choices?.[0]?.delta?.content;
           if (!delta) continue;
           answer += delta;
@@ -161,7 +155,7 @@ router.post('/chat', async (req, res) => {
       return;
     }
 
-    const answer = await askOpenAI(messages, { model }); // Pasar modelo
+    const answer = await askOpenAI(messages, { model });
     res.json({
       answer,
       hits: hits.map(h => ({

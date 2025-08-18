@@ -1,13 +1,9 @@
-// indexFiles.js - Versión actualizada
-// Cambios principales:
-// - Cambiado EMBEDDING_MODEL a "gpt-5-embed-4096" para usar GPT-5 embeddings.
-// - Procesamiento de Excel en bloques de máximo 200 filas (configurable via env o constante).
-// - Agregado check para limitar bloques a 1MB de texto crudo; si excede, dividir el bloque.
-// - Implementado batching de embeddings: máximo 20 en paralelo usando Promise.all.
-// - Forzado reindexación completa desde cero (ya era así, pero confirmado: sobrescribe el archivo).
-// - Llamadas a global.gc() después de cada lote de embeddings.
-// - Logs mejorados para progreso (bloques procesados, embeddings generados).
-// - Constantes configurables: MAX_ROWS_PER_BLOCK, MAX_BLOCK_SIZE_BYTES, BATCH_SIZE, MAX_TOKENS_EMB.
+// indexFiles.js - Versión actualizada adicionalmente
+// Cambios nuevos:
+// - Cambiado EMBEDDING_MODEL a "text-embedding-3-large" ya que no se encontró evidencia de 'gpt-5-embed-4096' en búsquedas actuales (dimensión 3072 en lugar de 4096, pero ajustable).
+// - Añadido chequeo para evitar duplicados en el vectorstore durante la escritura (usando Set de keys path-block-chunk).
+// - Logs mejorados para detectar duplicados si ocurren.
+// Nota: Si en el futuro hay un modelo de embeddings GPT-5, actualizar aquí.
 
 import fs from "fs";
 import fsPromises from "fs/promises";
@@ -19,16 +15,16 @@ import { createEmbedding } from "../services/embeddingsService.js";
 const gc = global.gc ? () => global.gc() : () => {};
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || "./vectorstore/index.json";
 
-// Modelo forzado a GPT-5 embeddings
-const EMBEDDING_MODEL = "gpt-5-embed-4096"; // Cambiado a GPT-5 según requerimientos
+// Modelo ajustado a uno válido; no se encontró 'gpt-5-embed-4096', usar 'text-embedding-3-large' (dimensión 3072)
+const EMBEDDING_MODEL = "text-embedding-3-large"; // Cambiado para compatibilidad; si GPT-5 embeddings existe, actualizar.
 
 // Constantes configurables
 const MAX_TOKENS_EMB = Number(process.env.MAX_TOKENS_EMB) > 0 ? Number(process.env.MAX_TOKENS_EMB) : 8192;
-const MAX_ROWS_PER_BLOCK = Number(process.env.MAX_ROWS_PER_BLOCK) > 0 ? Number(process.env.MAX_ROWS_PER_BLOCK) : 200; // Máximo 200 filas por bloque para Excel
-const MAX_BLOCK_SIZE_BYTES = 1024 * 1024; // 1MB máximo por bloque de texto crudo
-const BATCH_SIZE = 20; // Máximo 20 embeddings en paralelo
+const MAX_ROWS_PER_BLOCK = Number(process.env.MAX_ROWS_PER_BLOCK) > 0 ? Number(process.env.MAX_ROWS_PER_BLOCK) : 200;
+const MAX_BLOCK_SIZE_BYTES = 1024 * 1024; // 1MB
+const BATCH_SIZE = 20;
 
-// Tiktoken encoder seguro con fallback
+// Tiktoken encoder
 let enc;
 try {
   enc = encoding_for_model(EMBEDDING_MODEL);
@@ -55,7 +51,7 @@ function logMemory() {
   );
 }
 
-/** Divide por tokens con estrategia de partición binaria para ajustar al límite */
+/** Divide por tokens con estrategia de partición binaria */
 function splitToFit(text) {
   const parts = [];
   const stack = [text];
@@ -65,7 +61,6 @@ function splitToFit(text) {
       parts.push(chunk);
     } else {
       const mid = Math.floor(chunk.length / 2);
-      // dividir por caracteres (rápido) y seguir ajustando por tokens
       stack.push(chunk.slice(0, mid), chunk.slice(mid));
     }
   }
@@ -77,7 +72,7 @@ function chunkText(str) {
   return splitToFit(str);
 }
 
-/** Divide un bloque de texto si excede MAX_BLOCK_SIZE_BYTES */
+/** Divide un bloque si > MAX_BLOCK_SIZE_BYTES */
 function splitBlockIfLarge(block) {
   const encoder = new TextEncoder();
   const size = encoder.encode(block).length;
@@ -105,7 +100,7 @@ function splitBlockIfLarge(block) {
     process.exit(1);
   }
 
-  // Forzar reindexación completa: eliminar archivo existente si existe
+  // Forzar reindexación completa
   try {
     await fsPromises.unlink(VECTORSTORE_PATH);
     console.log(`🗑️ Vectorstore anterior eliminado para reindexación completa.`);
@@ -118,10 +113,11 @@ function splitBlockIfLarge(block) {
   writer.write("[\n");
   let first = true;
 
+  const seen = new Set(); // Para evitar duplicados: key = path-block-chunk
+
   const files = await listAllFiles();
   let totalEmbeddings = 0;
   for (const file of files) {
-    // Alineado con fileService: doc, docx, xlsx
     if (!file.path.match(/\.(docx?|xlsx)$/i)) {
       console.log(`⏭ Saltando: ${file.path} (formato no compatible)`);
       continue;
@@ -131,43 +127,35 @@ function splitBlockIfLarge(block) {
     logMemory();
     try {
       let texts;
-
       if (/\.xlsx$/i.test(file.name)) {
-        // Excel → múltiples bloques (TSV) con límite de filas
         texts = await getFileText(file, { rowsPerBlock: MAX_ROWS_PER_BLOCK });
       } else {
-        // Word (docx, doc) → un único bloque de texto
         const raw = await readFileContent(file);
         texts = [raw];
       }
 
-      // Validación de bloques de texto
       if (!Array.isArray(texts) || texts.length === 0) {
-        console.error(`   ❌ ${file.name}: No se pudo extraer texto para ${file.path}`);
+        console.error(`   ❌ ${file.name}: No se pudo extraer texto`);
         continue;
       }
 
-      // Filtrar vacíos y aplicar split si >1MB
       const nonEmpty = texts.flatMap(t => splitBlockIfLarge(typeof t === "string" ? t.trim() : "")).filter(Boolean);
       if (nonEmpty.length === 0) {
-        console.error(`   ❌ ${file.name}: No se obtuvo texto útil para ${file.path}`);
+        console.error(`   ❌ ${file.name}: No texto útil`);
         continue;
       }
 
       console.log(`   📊 Bloques procesados: ${nonEmpty.length} para ${file.name}`);
 
-      // Procesar cada bloque/bucket de texto
       for (let j = 0; j < nonEmpty.length; j++) {
         const raw = nonEmpty[j];
-
         const chunks = chunkText(raw);
-        // Batching: procesar chunks en lotes de BATCH_SIZE
         for (let k = 0; k < chunks.length; k += BATCH_SIZE) {
           const batch = chunks.slice(k, k + BATCH_SIZE);
           const embeddings = await Promise.all(
             batch.map(async (text, idx) => {
               try {
-                const embedding = await createEmbedding(text, { model: EMBEDDING_MODEL }); // Pasar modelo explícitamente
+                const embedding = await createEmbedding(text, { model: EMBEDDING_MODEL });
                 if (!Array.isArray(embedding) || embedding.length === 0) {
                   console.error(`   ❌ ${file.name} [block ${j}] [chunk ${k + idx}]: Embedding inválido`);
                   return null;
@@ -185,10 +173,16 @@ function splitBlockIfLarge(block) {
           console.log(`   ✅ Lote procesado: ${valid.length} embeddings generados para [block ${j}]`);
 
           for (const { text, embedding, chunkIndex } of valid) {
+            const key = `${file.path}-${j}-${chunkIndex}`;
+            if (seen.has(key)) {
+              console.warn(`   ⚠️ Duplicado detectado y saltado: ${key}`);
+              continue;
+            }
+            seen.add(key);
             const record = {
               fileId: file.id,
               path: file.path,
-              block: j,           // índice del bloque (especialmente útil para XLSX)
+              block: j,
               chunk: chunkIndex,
               text,
               embedding,
@@ -199,19 +193,15 @@ function splitBlockIfLarge(block) {
             first = false;
           }
 
-          // GC después de cada lote
           if (global.gc) gc();
           logMemory();
         }
-
-        // GC inter-bloques para Excels grandes
         if (global.gc) gc();
         logMemory();
       }
     } catch (err) {
       console.error(`   ❌ ${file.name}: ${err.message}`);
     }
-
     logMemory();
     if (global.gc) gc();
   }

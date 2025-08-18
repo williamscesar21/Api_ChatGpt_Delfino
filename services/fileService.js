@@ -1,10 +1,4 @@
-// fileService.js - Versión actualizada
-// Cambios principales:
-// - Ajustado XLSX_ROWS_PER_BLOCK por defecto a 200 (config via env o constante).
-// - Asegurado división en bloques pequeños y limpios para evitar saturación de memoria.
-// - Agregados comentarios detallados para ajustar tamaño de bloque (e.g., para Excels grandes, reducir filas).
-// - En getFileText, filtrado de bloques vacíos y normalización estricta.
-// - Logs mejorados para progreso (e.g., número de filas por hoja).
+// fileService.js - Sin cambios mayores, solo comentario actualizado para claridad en ajustes de bloque.
 
 import axios from "axios";
 import qs from "qs";
@@ -16,7 +10,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-// GC manual si está disponible
+// GC manual
 const gc = global.gc ? () => global.gc() : () => {};
 
 /* =========  ENV & AUTH  ============================================== */
@@ -31,12 +25,11 @@ const {
   XLSX_ROWS_PER_BLOCK: XLSX_ROWS_PER_BLOCK_ENV
 } = process.env;
 
-// ✅ Por defecto 200 filas por bloque (ajustable via .env XLSX_ROWS_PER_BLOCK).
-// Para Excels muy grandes o con celdas anchas, reduce este valor (e.g., 100) para evitar bloques >1MB.
-// Si usas getFileText con opts.rowsPerBlock, sobreescribe este default.
+// Por defecto 200 filas por bloque. Ajusta via .env XLSX_ROWS_PER_BLOCK.
+// Para Excels densos, reduce a 100-150 para mantener bloques <1MB y evitar saturación de memoria/embeddings.
 const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 200;
 
-/** Cache simple para OAuth token */
+/** Cache OAuth token */
 let cache = { token: null, exp: 0 };
 
 async function getToken() {
@@ -75,7 +68,7 @@ async function listChildren(folder = "") {
     : `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/drives/${DRIVE_ID}/root/children`;
 
   const { data } = await axios.get(url, { headers });
-  return data.value; // Array<DriveItem>
+  return data.value;
 }
 
 async function walk(base = "") {
@@ -97,7 +90,6 @@ async function walk(base = "") {
   return files;
 }
 
-/** Devuelve lista de todos los archivos soportados bajo la carpeta raíz */
 export async function listAllFiles() {
   const files = await walk(SHAREPOINT_ROOT_PATH.trim());
   console.log(`Found ${files.length} files.`);
@@ -120,7 +112,6 @@ export async function readFileContent(file) {
     throw new Error(`Extensión no soportada: ${file.name}`);
   }
 
-  // Evitar archivos > 10MB
   if (file.size > 10 * 1024 * 1024) {
     throw new Error(`File too large: ${file.path} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
   }
@@ -131,14 +122,12 @@ export async function readFileContent(file) {
     { headers: await authHeaders(), responseType: "arraybuffer" }
   );
 
-  // DOCX → Mammoth
   if (/\.docx$/i.test(file.name)) {
     const { value } = await mammoth.extractRawText({ buffer });
     gc();
     return value.trim();
   }
 
-  // DOC → WordExtractor, fallback a officeParser
   if (/\.doc$/i.test(file.name)) {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "doc-"));
     const tmpPath = path.join(tmpDir, `${Date.now()}.doc`);
@@ -150,7 +139,6 @@ export async function readFileContent(file) {
         const txt = normalize(doc.getBody()).trim();
         if (txt) return txt;
       } catch {
-        // fallback
       }
 
       return await new Promise((res, rej) =>
@@ -164,14 +152,13 @@ export async function readFileContent(file) {
     }
   }
 
-  // XLSX → procesamiento en memoria
   if (/\.xlsx$/i.test(file.name)) {
     const workbook = xlsx.read(buffer, { type: "buffer", cellDates: true, sparse: true });
     const sheets = {};
     workbook.SheetNames.forEach((name) => {
       const sheet = workbook.Sheets[name];
       const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
-      console.log(`Sheet ${name} has ${rows.length} rows`); // Log de progreso
+      console.log(`Sheet ${name} has ${rows.length} rows`);
       sheets[name] = rows.map((cells) =>
         cells.reduce((obj, v, i) => {
           obj[xlsx.utils.encode_col(i)] = v;
@@ -184,10 +171,9 @@ export async function readFileContent(file) {
   }
 }
 
-/* =========  TEXTO EN BLOQUES (para Excel enorme)  ===================== */
-// Nota: Este método divide Excels en bloques pequeños para evitar saturación de memoria.
-// Ajusta rowsPerBlock según necesidades: valores bajos (e.g., 50-100) para archivos con muchas columnas o datos densos.
-// El bloque incluye encabezado solo en el primero por hoja para ahorrar espacio.
+/* =========  TEXTO EN BLOQUES  ===================== */
+// División en bloques pequeños para memoria eficiente.
+// Ajusta rowsPerBlock bajo para bloques más pequeños.
 export async function getFileText(file, opts = {}) {
   const rowsPerBlock = Number(opts.rowsPerBlock) > 0 ? Number(opts.rowsPerBlock) : XLSX_ROWS_PER_BLOCK;
 
@@ -199,16 +185,13 @@ export async function getFileText(file, opts = {}) {
     return [""];
   }
 
-  // Word → ya es string, lo devolvemos envuelto en array
   if (typeof content === "string") {
     return [content];
   }
 
-  // Excel → TSV multi-hoja en bloques
   try {
     const blocks = [];
     for (const [sheet, rows] of Object.entries(content)) {
-      // Determinar columnas
       const colSet = new Set();
       for (let k = 0; k < Math.min(rows.length, 1000); k++) {
         Object.keys(rows[k]).forEach((c) => colSet.add(c));
@@ -228,8 +211,7 @@ export async function getFileText(file, opts = {}) {
         counter++;
 
         if (counter >= rowsPerBlock) {
-          blocks.push(current.join("\n").trim()); // Trim para limpiar
-          // Para el siguiente bloque ya NO repetimos encabezado
+          blocks.push(current.join("\n").trim());
           current = [];
           counter = 0;
           blockIndex++;
@@ -237,7 +219,7 @@ export async function getFileText(file, opts = {}) {
         }
       }
 
-      if (current.length > 1) { // Evitar bloques vacíos (solo si hay datos)
+      if (current.length > 1) {
         blocks.push(current.join("\n").trim());
       }
     }
