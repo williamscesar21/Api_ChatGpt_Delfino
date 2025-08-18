@@ -16,7 +16,7 @@ const gc = global.gc ? () => global.gc() : () => {};
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || "./vectorstore/index.json";
 
 // Modelo ajustado a uno válido; no se encontró 'gpt-5-embed-4096', usar 'text-embedding-3-large' (dimensión 3072)
-const EMBEDDING_MODEL = "text-embedding-3-large"; // Cambiado para compatibilidad; si GPT-5 embeddings existe, actualizar.
+const EMBEDDING_MODEL = "text-embedding-3-small"; // Cambiado para compatibilidad; si GPT-5 embeddings existe, actualizar.
 
 // Constantes configurables
 const MAX_TOKENS_EMB = Number(process.env.MAX_TOKENS_EMB) > 0 ? Number(process.env.MAX_TOKENS_EMB) : 8192;
