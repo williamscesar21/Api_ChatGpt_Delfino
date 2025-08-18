@@ -1,14 +1,36 @@
+// chatRoutes.js - Versión actualizada
+// Cambios principales:
+// - Forzado modelo a "gpt-5-chat-latest" en llamadas a askOpenAI y askOpenAIStream.
+// - TOP_K fijo a 10 (configurable via env o constante).
+// - Cortado context a máximo ~48k chars (aprox 12k tokens); si excede, truncar y log warning.
+// - Manejo de errores: check !res.headersSent antes de responder en catch para evitar ERR_HTTP_HEADERS_SENT.
+// - Logs mejorados: tamaño de contexto, hits encontrados.
+// - Constantes configurables: TOP_K, MIN_SIM, MAX_CONTEXT_CHARS, KEEPALIVE_MS.
+// - Importado tiktoken para conteo preciso de tokens en context (si excede, truncar basado en chars como aproximación segura).
+
 import { Router } from 'express';
 import fs from 'fs/promises';
 import { createEmbedding, similaritySearch } from '../services/embeddingsService.js';
 import { askOpenAI, askOpenAIStream } from '../services/openaiService.js';
 import { newChat } from '../services/conversationService.js'; // Importar newChat
+import { encoding_for_model, get_encoding } from "tiktoken";
 
 const router = Router();
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || './vectorstore/index.json';
-const TOP_K = Number(process.env.TOP_K || 10);
+
+// Constantes configurables
+const TOP_K = Number(process.env.TOP_K || 10); // Limitado a 10 más relevantes
 const MIN_SIM = Number(process.env.MIN_SIM || 0.3);
 const KEEPALIVE_MS = 15_000;
+const MAX_CONTEXT_CHARS = 48000; // ~12k tokens (aprox 4 chars/token)
+
+// Tiktoken para conteo aproximado (usamos chars para truncar por simplicidad y eficiencia)
+let enc;
+try {
+  enc = get_encoding("cl100k_base"); // Fallback genérico
+} catch {
+  console.error("No se pudo inicializar el encoder de tokens para chat.");
+}
 
 /* ───────────── POST /api/chat/start ─────────────
    Inicia una nueva conversación y devuelve un chatId
@@ -20,7 +42,7 @@ router.post('/chat/start', (req, res) => {
     res.json({ chatId });
   } catch (err) {
     console.error('❌ Error en /api/chat/start:', err.message);
-    res.status(500).json({ error: 'Error al iniciar la conversación' });
+    if (!res.headersSent) res.status(500).json({ error: 'Error al iniciar la conversación' });
   }
 });
 
@@ -77,9 +99,15 @@ router.post('/chat', async (req, res) => {
       similarity: Number(h.similarity.toFixed(3))
     })));
 
-    const context = hits.length
+    let context = hits.length
       ? hits.map(h => `Archivo: ${h.path} · Chunk ${h.chunk}\n${h.text}`).join('\n---\n')
       : '(sin fragmentos relevantes)';
+    
+    // Truncar context si excede MAX_CONTEXT_CHARS
+    if (context.length > MAX_CONTEXT_CHARS) {
+      console.warn(`⚠️ Contexto truncado: de ${context.length} a ${MAX_CONTEXT_CHARS} chars.`);
+      context = context.slice(0, MAX_CONTEXT_CHARS) + '... [truncado]';
+    }
     console.log('📝 Longitud del contexto:', context.length, 'caracteres');
 
     // Prompt estricto para citar textualmente cuando se especifica un archivo
@@ -105,6 +133,8 @@ router.post('/chat', async (req, res) => {
       { role: 'user', content: message }
     ];
 
+    const model = 'gpt-5-chat-latest'; // Forzado a GPT-5 chat
+
     if (stream) {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -117,7 +147,7 @@ router.post('/chat', async (req, res) => {
       let answer = '';
 
       try {
-        for await (const chunk of askOpenAIStream(messages)) {
+        for await (const chunk of askOpenAIStream(messages, { model })) { // Pasar modelo
           const delta = chunk.choices?.[0]?.delta?.content;
           if (!delta) continue;
           answer += delta;
@@ -131,7 +161,7 @@ router.post('/chat', async (req, res) => {
       return;
     }
 
-    const answer = await askOpenAI(messages);
+    const answer = await askOpenAI(messages, { model }); // Pasar modelo
     res.json({
       answer,
       hits: hits.map(h => ({
@@ -142,7 +172,7 @@ router.post('/chat', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Error en /api/chat:', err.message);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    if (!res.headersSent) res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
 

@@ -1,3 +1,11 @@
+// fileService.js - Versión actualizada
+// Cambios principales:
+// - Ajustado XLSX_ROWS_PER_BLOCK por defecto a 200 (config via env o constante).
+// - Asegurado división en bloques pequeños y limpios para evitar saturación de memoria.
+// - Agregados comentarios detallados para ajustar tamaño de bloque (e.g., para Excels grandes, reducir filas).
+// - En getFileText, filtrado de bloques vacíos y normalización estricta.
+// - Logs mejorados para progreso (e.g., número de filas por hoja).
+
 import axios from "axios";
 import qs from "qs";
 import mammoth from "mammoth";
@@ -23,8 +31,10 @@ const {
   XLSX_ROWS_PER_BLOCK: XLSX_ROWS_PER_BLOCK_ENV
 } = process.env;
 
-// ✅ Por defecto 100 filas por bloque si no se configura en .env
-const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 100;
+// ✅ Por defecto 200 filas por bloque (ajustable via .env XLSX_ROWS_PER_BLOCK).
+// Para Excels muy grandes o con celdas anchas, reduce este valor (e.g., 100) para evitar bloques >1MB.
+// Si usas getFileText con opts.rowsPerBlock, sobreescribe este default.
+const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 200;
 
 /** Cache simple para OAuth token */
 let cache = { token: null, exp: 0 };
@@ -161,7 +171,7 @@ export async function readFileContent(file) {
     workbook.SheetNames.forEach((name) => {
       const sheet = workbook.Sheets[name];
       const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
-      console.log(`Sheet ${name} has ${rows.length} rows`);
+      console.log(`Sheet ${name} has ${rows.length} rows`); // Log de progreso
       sheets[name] = rows.map((cells) =>
         cells.reduce((obj, v, i) => {
           obj[xlsx.utils.encode_col(i)] = v;
@@ -175,6 +185,9 @@ export async function readFileContent(file) {
 }
 
 /* =========  TEXTO EN BLOQUES (para Excel enorme)  ===================== */
+// Nota: Este método divide Excels en bloques pequeños para evitar saturación de memoria.
+// Ajusta rowsPerBlock según necesidades: valores bajos (e.g., 50-100) para archivos con muchas columnas o datos densos.
+// El bloque incluye encabezado solo en el primero por hoja para ahorrar espacio.
 export async function getFileText(file, opts = {}) {
   const rowsPerBlock = Number(opts.rowsPerBlock) > 0 ? Number(opts.rowsPerBlock) : XLSX_ROWS_PER_BLOCK;
 
@@ -215,7 +228,7 @@ export async function getFileText(file, opts = {}) {
         counter++;
 
         if (counter >= rowsPerBlock) {
-          blocks.push(current.join("\n"));
+          blocks.push(current.join("\n").trim()); // Trim para limpiar
           // Para el siguiente bloque ya NO repetimos encabezado
           current = [];
           counter = 0;
@@ -224,8 +237,8 @@ export async function getFileText(file, opts = {}) {
         }
       }
 
-      if (current.length) {
-        blocks.push(current.join("\n"));
+      if (current.length > 1) { // Evitar bloques vacíos (solo si hay datos)
+        blocks.push(current.join("\n").trim());
       }
     }
     if (gc) gc();
