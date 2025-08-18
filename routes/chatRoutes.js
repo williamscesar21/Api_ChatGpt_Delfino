@@ -1,9 +1,9 @@
-// chatRoutes.js - Versión actualizada adicionalmente
-// Cambios nuevos:
-// - Cambiado model a 'gpt-5' basado en la release de Agosto 2025 (eliminado '-chat-latest' ya que no existe; usar 'gpt-5' para chat).
-// - Añadido deduplicación de hits por path-chunk para evitar repeticiones en resultados y reducir contexto innecesariamente grande.
-// - Log añadido para hits únicos después de dedup.
-// - Si contexto aún excede después de truncar, warning ya existe.
+// chatRoutes.js - Versión actualizada
+// Cambios basados en información actual (agosto 2025):
+// - Modelo para chat: 'gpt-5' como el modelo disponible y más inteligente para respuestas.
+// - Embeddings usan modelo separado (text-embedding-3-large en indexFiles.js), y contexto se pasa a gpt-5 para respuesta "con mucha más inteligencia".
+// - Mantenida deduplicación de hits para evitar contexto duplicado y grande.
+// - Truncado de contexto si excede.
 
 import { Router } from 'express';
 import fs from 'fs/promises';
@@ -20,7 +20,6 @@ const MIN_SIM = Number(process.env.MIN_SIM || 0.3);
 const KEEPALIVE_MS = 15_000;
 const MAX_CONTEXT_CHARS = 48000;
 
-// Tiktoken fallback
 let enc;
 try {
   enc = get_encoding("cl100k_base");
@@ -28,7 +27,6 @@ try {
   console.error("No se pudo inicializar el encoder de tokens para chat.");
 }
 
-/* ───────────── POST /api/chat/start ───────────── */
 router.post('/chat/start', (req, res) => {
   try {
     const chatId = newChat();
@@ -40,7 +38,6 @@ router.post('/chat/start', (req, res) => {
   }
 });
 
-/* ───────────── POST /api/chat ───────────── */
 router.post('/chat', async (req, res) => {
   try {
     const { message, stream = false, fileName } = req.body;
@@ -80,7 +77,6 @@ router.post('/chat', async (req, res) => {
     console.log('📏 Query embedding length:', queryEmb.length);
     let hits = similaritySearch(queryEmb, filteredVectorstore, TOP_K, MIN_SIM);
 
-    // Deduplicar hits por path-chunk (tomar el de mayor similarity si dups)
     const hitMap = new Map();
     for (const h of hits) {
       const key = `${h.path}-${h.chunk}`;
@@ -127,7 +123,7 @@ router.post('/chat', async (req, res) => {
       { role: 'user', content: message }
     ];
 
-    const model = 'gpt-5'; // Cambiado a 'gpt-5' basado en release 2025; elimina '-chat-latest' para evitar 403.
+    const model = 'gpt-5'; // Modelo separado para chat, más inteligente (GPT-5 disponible en 2025)
 
     if (stream) {
       res.writeHead(200, {

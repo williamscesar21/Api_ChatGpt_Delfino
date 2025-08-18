@@ -1,9 +1,8 @@
-// indexFiles.js - Versión actualizada adicionalmente
-// Cambios nuevos:
-// - Cambiado EMBEDDING_MODEL a "text-embedding-3-large" ya que no se encontró evidencia de 'gpt-5-embed-4096' en búsquedas actuales (dimensión 3072 en lugar de 4096, pero ajustable).
-// - Añadido chequeo para evitar duplicados en el vectorstore durante la escritura (usando Set de keys path-block-chunk).
-// - Logs mejorados para detectar duplicados si ocurren.
-// Nota: Si en el futuro hay un modelo de embeddings GPT-5, actualizar aquí.
+// indexFiles.js - Versión actualizada
+// Cambios basados en información actual (agosto 2025):
+// - EMBEDDING_MODEL: Usando 'text-embedding-3-large' como el modelo de embeddings más reciente y disponible de OpenAI (dimensión 3072, no existe 'gpt-5-embed-4096').
+// - Mantenida deduplicación y batching para eficiencia.
+// - Logs para progreso.
 
 import fs from "fs";
 import fsPromises from "fs/promises";
@@ -15,16 +14,13 @@ import { createEmbedding } from "../services/embeddingsService.js";
 const gc = global.gc ? () => global.gc() : () => {};
 const VECTORSTORE_PATH = process.env.VECTORSTORE_PATH || "./vectorstore/index.json";
 
-// Modelo ajustado a uno válido; no se encontró 'gpt-5-embed-4096', usar 'text-embedding-3-large' (dimensión 3072)
-const EMBEDDING_MODEL = "text-embedding-3-small"; // Cambiado para compatibilidad; si GPT-5 embeddings existe, actualizar.
+const EMBEDDING_MODEL = "text-embedding-3-large"; // Modelo válido de OpenAI para embeddings en 2025
 
-// Constantes configurables
 const MAX_TOKENS_EMB = Number(process.env.MAX_TOKENS_EMB) > 0 ? Number(process.env.MAX_TOKENS_EMB) : 8192;
 const MAX_ROWS_PER_BLOCK = Number(process.env.MAX_ROWS_PER_BLOCK) > 0 ? Number(process.env.MAX_ROWS_PER_BLOCK) : 200;
-const MAX_BLOCK_SIZE_BYTES = 1024 * 1024; // 1MB
+const MAX_BLOCK_SIZE_BYTES = 1024 * 1024;
 const BATCH_SIZE = 20;
 
-// Tiktoken encoder
 let enc;
 try {
   enc = encoding_for_model(EMBEDDING_MODEL);
@@ -51,7 +47,6 @@ function logMemory() {
   );
 }
 
-/** Divide por tokens con estrategia de partición binaria */
 function splitToFit(text) {
   const parts = [];
   const stack = [text];
@@ -72,7 +67,6 @@ function chunkText(str) {
   return splitToFit(str);
 }
 
-/** Divide un bloque si > MAX_BLOCK_SIZE_BYTES */
 function splitBlockIfLarge(block) {
   const encoder = new TextEncoder();
   const size = encoder.encode(block).length;
@@ -100,7 +94,6 @@ function splitBlockIfLarge(block) {
     process.exit(1);
   }
 
-  // Forzar reindexación completa
   try {
     await fsPromises.unlink(VECTORSTORE_PATH);
     console.log(`🗑️ Vectorstore anterior eliminado para reindexación completa.`);
@@ -113,7 +106,7 @@ function splitBlockIfLarge(block) {
   writer.write("[\n");
   let first = true;
 
-  const seen = new Set(); // Para evitar duplicados: key = path-block-chunk
+  const seen = new Set();
 
   const files = await listAllFiles();
   let totalEmbeddings = 0;

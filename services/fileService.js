@@ -1,4 +1,4 @@
-// fileService.js - Sin cambios mayores, solo comentario actualizado para claridad en ajustes de bloque.
+// fileService.js - Sin cambios adicionales, ya optimizado para bloques pequeños.
 
 import axios from "axios";
 import qs from "qs";
@@ -10,10 +10,8 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
-// GC manual
 const gc = global.gc ? () => global.gc() : () => {};
 
-/* =========  ENV & AUTH  ============================================== */
 const {
   AZURE_TENANT_ID,
   AZURE_CLIENT_ID,
@@ -25,11 +23,8 @@ const {
   XLSX_ROWS_PER_BLOCK: XLSX_ROWS_PER_BLOCK_ENV
 } = process.env;
 
-// Por defecto 200 filas por bloque. Ajusta via .env XLSX_ROWS_PER_BLOCK.
-// Para Excels densos, reduce a 100-150 para mantener bloques <1MB y evitar saturación de memoria/embeddings.
 const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 200;
 
-/** Cache OAuth token */
 let cache = { token: null, exp: 0 };
 
 async function getToken() {
@@ -56,11 +51,9 @@ async function authHeaders() {
   return { Authorization: `Bearer ${token}` };
 }
 
-/* =========  FILE FILTER & PATH BUILD ================================= */
 const FILE_REGEX = /\.(docx?|xlsx)$/i;
 const buildPath = (segments) => segments.map(encodeURIComponent).join("/");
 
-/* =========  LISTADO RECURSIVO  ======================================= */
 async function listChildren(folder = "") {
   const headers = await authHeaders();
   const url = folder
@@ -96,7 +89,6 @@ export async function listAllFiles() {
   return files;
 }
 
-/* =========  UTILS DE NORMALIZACIÓN  ================================= */
 const normalize = (txt) => {
   if (txt == null) return "";
   if (typeof txt === "string") return txt;
@@ -106,7 +98,6 @@ const normalize = (txt) => {
   return String(txt);
 };
 
-/* =========  DESCARGA + PARSEO  ======================================= */
 export async function readFileContent(file) {
   if (!FILE_REGEX.test(file.name)) {
     throw new Error(`Extensión no soportada: ${file.name}`);
@@ -171,9 +162,6 @@ export async function readFileContent(file) {
   }
 }
 
-/* =========  TEXTO EN BLOQUES  ===================== */
-// División en bloques pequeños para memoria eficiente.
-// Ajusta rowsPerBlock bajo para bloques más pequeños.
 export async function getFileText(file, opts = {}) {
   const rowsPerBlock = Number(opts.rowsPerBlock) > 0 ? Number(opts.rowsPerBlock) : XLSX_ROWS_PER_BLOCK;
 
