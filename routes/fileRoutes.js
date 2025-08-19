@@ -30,7 +30,7 @@ router.post("/files/reindex", (_req, res) => {
         stdio:    "ignore",                   // no ocupa stdout de Express
         env: {
           ...process.env,
-          NODE_OPTIONS: "--max-old-space-size=2048", // heap extra solo al job
+          NODE_OPTIONS: "--max-old-space-size=12288", // heap extra solo al job
         },
       }
     );
