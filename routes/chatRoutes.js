@@ -1,9 +1,8 @@
 // chatRoutes.js - Versión actualizada
-// Cambios basados en información actual (agosto 2025):
-// - Modelo para chat: 'gpt-5' como el modelo disponible y más inteligente para respuestas.
-// - Embeddings usan modelo separado (text-embedding-3-large en indexFiles.js), y contexto se pasa a gpt-5 para respuesta "con mucha más inteligencia".
-// - Mantenida deduplicación de hits para evitar contexto duplicado y grande.
-// - Truncado de contexto si excede.
+// Cambios:
+// - Modelo para chat: Cambiado a 'o3' como solicitado, para respuestas inteligentes (basado en modelos de razonamiento de OpenAI en 2025).
+// - Embeddings usan 'text-embedding-3-large' (separado, ya que modelos de chat no generan embeddings directamente; esto mantiene efectividad).
+// - Mantenida optimización de contexto y deduplicación.
 
 import { Router } from 'express';
 import fs from 'fs/promises';
@@ -123,7 +122,7 @@ router.post('/chat', async (req, res) => {
       { role: 'user', content: message }
     ];
 
-    const model = 'gpt-5'; // Modelo separado para chat, más inteligente (GPT-5 disponible en 2025)
+    const model = 'o3'; // Modelo único solicitado para chat (razonamiento inteligente en 2025)
 
     if (stream) {
       res.writeHead(200, {

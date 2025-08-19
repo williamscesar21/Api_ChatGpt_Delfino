@@ -1,4 +1,4 @@
-// fileService.js - Sin cambios adicionales, ya optimizado para bloques pequeños.
+// fileService.js - Optimizado con división dinámica de bloques para evitar límite de tokens
 
 import axios from "axios";
 import qs from "qs";
@@ -23,7 +23,11 @@ const {
   XLSX_ROWS_PER_BLOCK: XLSX_ROWS_PER_BLOCK_ENV
 } = process.env;
 
-const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 200;
+// Bloques pequeños por defecto
+const XLSX_ROWS_PER_BLOCK = Number(XLSX_ROWS_PER_BLOCK_ENV) > 0 ? Number(XLSX_ROWS_PER_BLOCK_ENV) : 50;
+
+// Límite seguro de tokens por bloque (~300k máx API → usamos margen de 250k)
+const MAX_TOKENS_PER_BLOCK = 250000;
 
 let cache = { token: null, exp: 0 };
 
@@ -129,9 +133,7 @@ export async function readFileContent(file) {
         const doc = await new WordExtractor().extract(tmpPath);
         const txt = normalize(doc.getBody()).trim();
         if (txt) return txt;
-      } catch {
-      }
-
+      } catch {}
       return await new Promise((res, rej) =>
         officeParser.parseOffice(tmpPath, (err, text) =>
           err ? rej(err) : res(normalize(text).trim())
@@ -148,18 +150,29 @@ export async function readFileContent(file) {
     const sheets = {};
     workbook.SheetNames.forEach((name) => {
       const sheet = workbook.Sheets[name];
-      const rows = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
+      const rows = xlsx.utils.sheet_to_json(sheet, { header: "A", blankrows: false, raw: false });
       console.log(`Sheet ${name} has ${rows.length} rows`);
-      sheets[name] = rows.map((cells) =>
-        cells.reduce((obj, v, i) => {
-          obj[xlsx.utils.encode_col(i)] = v;
-          return obj;
-        }, {})
-      );
+      sheets[name] = rows;
     });
     gc();
     return sheets;
   }
+}
+
+// 🔥 Función para dividir dinámicamente bloques muy largos
+function splitIfTooLong(textBlock, maxTokens = MAX_TOKENS_PER_BLOCK) {
+  // Aproximamos tokens: ~4 caracteres por token → margen conservador
+  const estTokens = Math.ceil(textBlock.length / 4);
+  if (estTokens <= maxTokens) return [textBlock];
+
+  console.warn(`⚠️ Bloque excede ${maxTokens} tokens (~${estTokens}), dividiendo en partes...`);
+  const parts = [];
+  const chunkSize = Math.floor((textBlock.length / (estTokens / maxTokens)) + 1);
+
+  for (let i = 0; i < textBlock.length; i += chunkSize) {
+    parts.push(textBlock.slice(i, i + chunkSize));
+  }
+  return parts;
 }
 
 export async function getFileText(file, opts = {}) {
@@ -174,7 +187,7 @@ export async function getFileText(file, opts = {}) {
   }
 
   if (typeof content === "string") {
-    return [content];
+    return splitIfTooLong(content);
   }
 
   try {
@@ -184,31 +197,42 @@ export async function getFileText(file, opts = {}) {
       for (let k = 0; k < Math.min(rows.length, 1000); k++) {
         Object.keys(rows[k]).forEach((c) => colSet.add(c));
       }
-      const cols = Array.from(colSet).sort((a, b) => {
-        const toIndex = (col) =>
-          col.split("").reduce((acc, ch) => acc * 26 + (ch.charCodeAt(0) - 64), 0);
-        return toIndex(a) - toIndex(b);
-      });
+      if (colSet.size === 0) continue;
 
-      let blockIndex = 0;
+      const cols = Array.from(colSet).sort((a, b) => xlsx.utils.decode_col(a) - xlsx.utils.decode_col(b));
+
+      const MAX_COLS = 500;
+      if (cols.length > MAX_COLS) {
+        console.warn(`⚠️ Hoja ${sheet} tiene ${cols.length} columnas usadas; truncando a primeras ${MAX_COLS}.`);
+        cols.splice(MAX_COLS);
+      }
+      console.log(`Building blocks for sheet ${sheet} with ${rows.length} rows and ${cols.length} columns`);
+
       let current = [`>>> Hoja: ${sheet}`, cols.join("\t")];
       let counter = 0;
+      let totalRowsProcessed = 0;
 
       for (const r of rows) {
         current.push(cols.map((c) => (r[c] ?? "")).join("\t"));
         counter++;
+        totalRowsProcessed++;
+
+        if (totalRowsProcessed % 1000 === 0) {
+          console.log(`Processed ${totalRowsProcessed} / ${rows.length} rows in sheet ${sheet}`);
+        }
 
         if (counter >= rowsPerBlock) {
-          blocks.push(current.join("\n").trim());
+          const blockText = current.join("\n").trim();
+          splitIfTooLong(blockText).forEach((p) => blocks.push(p));
           current = [];
           counter = 0;
-          blockIndex++;
           if (gc) gc();
         }
       }
 
       if (current.length > 1) {
-        blocks.push(current.join("\n").trim());
+        const blockText = current.join("\n").trim();
+        splitIfTooLong(blockText).forEach((p) => blocks.push(p));
       }
     }
     if (gc) gc();
